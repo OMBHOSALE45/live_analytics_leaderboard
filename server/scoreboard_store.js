@@ -1,0 +1,110 @@
+/**
+ * In-Memory Live Scoreboard Store
+ * Manages dynamically discovered teams from video stream,
+ * calculates team rankings by total kills, and broadcasts state.
+ */
+export class ScoreboardStore {
+  constructor() {
+    this.matchId = 'ffws-live-match';
+    this.map = 'BERMUDA';
+    this.status = 'WAITING_FOR_FEED';
+    this.teams = []; // Dynamically discovered teams
+    this.history = []; // History of sync updates
+    this.lastSyncTime = null;
+    this.totalKills = 0;
+    this.squadsAlive = 0;
+    this.totalPlayersAlive = 0;
+  }
+
+  reset() {
+    this.teams = [];
+    this.history = [];
+    this.status = 'WAITING_FOR_FEED';
+    this.lastSyncTime = null;
+    this.totalKills = 0;
+    this.squadsAlive = 0;
+    this.totalPlayersAlive = 0;
+    return this.getState();
+  }
+
+  syncScoreboard(payload) {
+    if (!payload || !Array.isArray(payload.teams)) {
+      return this.getState();
+    }
+
+    this.matchId = payload.matchId || this.matchId;
+    this.status = 'LIVE';
+    this.lastSyncTime = new Date().toISOString();
+
+    // Map incoming teams
+    const updatedTeams = payload.teams.map((rawTeam, idx) => {
+      const players = Array.isArray(rawTeam.players) ? rawTeam.players : [];
+      const computedKills = rawTeam.kills !== undefined 
+        ? rawTeam.kills 
+        : players.reduce((sum, p) => sum + (p.kills || 0), 0);
+      const computedAlive = rawTeam.alive !== undefined 
+        ? rawTeam.alive 
+        : players.filter(p => p.alive !== false).length;
+
+      return {
+        id: rawTeam.id || `team-${(rawTeam.colorName || `team_${idx}`).toLowerCase()}`,
+        name: rawTeam.name || `TEAM ${rawTeam.colorName || idx + 1}`,
+        color: rawTeam.color || '#00E5FF',
+        colorName: rawTeam.colorName || 'CYAN',
+        kills: computedKills,
+        elims: computedKills, // For compatibility with existing UI
+        alive: computedAlive,
+        totalPlayers: players.length || 4,
+        players: players.map(p => ({
+          slot: p.slot || 1,
+          name: p.name || 'Unknown',
+          kills: p.kills || 0,
+          alive: p.alive !== false
+        }))
+      };
+    });
+
+    // Rank teams: 1st by kills DESC, 2nd by alive DESC, 3rd by colorName
+    updatedTeams.sort((a, b) => {
+      if (b.kills !== a.kills) return b.kills - a.kills;
+      if (b.alive !== a.alive) return b.alive - a.alive;
+      return a.colorName.localeCompare(b.colorName);
+    });
+
+    // Assign ranking numbers
+    updatedTeams.forEach((t, i) => {
+      t.rank = i + 1;
+      t.default_rank = i + 1;
+    });
+
+    this.teams = updatedTeams;
+    this.totalKills = this.teams.reduce((sum, t) => sum + t.kills, 0);
+    this.squadsAlive = this.teams.filter(t => t.alive > 0).length;
+    this.totalPlayersAlive = this.teams.reduce((sum, t) => sum + t.alive, 0);
+
+    return this.getState();
+  }
+
+  getState() {
+    const isVisionActive = Boolean(this.lastSyncTime && (Date.now() - new Date(this.lastSyncTime).getTime() < 4000));
+    return {
+      match: {
+        id: this.matchId,
+        map: this.map,
+        status: this.status,
+        lastSync: this.lastSyncTime,
+        visionEngineActive: isVisionActive,
+        stats: {
+          totalKills: this.totalKills,
+          squadsAlive: this.squadsAlive,
+          totalSquads: this.teams.length,
+          totalPlayersAlive: this.totalPlayersAlive
+        }
+      },
+      leaderboard: this.teams,
+      killFeed: [],
+      pendingReviews: []
+    };
+  }
+}
+

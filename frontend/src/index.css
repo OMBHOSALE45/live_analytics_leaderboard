@@ -1,0 +1,130 @@
+@layer base {
+  body {
+    background-color: #0c0817;
+    color: #ffffff;
+    overflow-x: hidden;
+    font-family: 'Barlow Condensed', sans-serif;
+    user-select: none;
+    margin: 0;
+    min-height: 100vh;
+  }
+}
+
+/* Slanted Row Geometry matching FFWS graphic */
+.skew-badge {
+  transform: skewX(-18deg);
+  border-radius: 2px;
+}
+.unskew {
+  transform: skewX(18deg);
+}
+
+/* Chamfered esports clip path for HUD buttons & panels */
+.hud-clip-left {
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+}
+.hud-clip-right {
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+.hud-btn-skew {
+  transform: skewX(-14deg);
+}
+.hud-btn-unskew {
+  transform: skewX(14deg);
+}
+
+/* Diagonal Elims Survival Tally Bar (4 per squad) */
+.elim-bar {
+  transform: skewX(-22deg);
+  width: 6.5px;
+  height: 20px;
+  border-radius: 1.5px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-sizing: border-box;
+}
+
+/* Full bar: alive player glowing luminous gold */
+.elim-bar.active {
+  background: linear-gradient(180deg, #FFF566 0%, #FFCC00 100%);
+  box-shadow: 0 0 8px rgba(255, 204, 0, 0.8), inset 0 0 2px rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(255, 240, 150, 0.65);
+}
+
+/* Empty bar: eliminated player hollow dark slot with dim purple outline */
+.elim-bar.inactive {
+  background: rgba(18, 10, 32, 0.85);
+  border: 1.5px solid rgba(139, 92, 246, 0.4);
+  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.85);
+  opacity: 0.5;
+}
+
+/* Esports Tactical Grid & Ambient Tournament Stage Backdrop */
+.ff-bg-mesh {
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(91, 226, 255, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 85% 20%, rgba(246, 195, 59, 0.09) 0%, transparent 50%),
+    radial-gradient(circle at 50% 60%, rgba(123, 75, 229, 0.16) 0%, transparent 65%),
+    linear-gradient(135deg, #090513 0%, #110724 50%, #170d2f 100%);
+}
+
+.tactical-grid {
+  background-image: 
+    linear-gradient(rgba(123, 75, 229, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(123, 75, 229, 0.07) 1px, transparent 1px);
+  background-size: 38px 38px;
+}
+
+/* Leaderboard container sizing */
+#leaderboard-rows-container {
+  position: relative;
+  width: 100%;
+}
+
+.team-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 48px;
+  will-change: transform;
+}
+
+/* Flash highlight when scoring */
+@keyframes killFlash {
+  0% { filter: brightness(1); }
+  30% { filter: brightness(2) drop-shadow(0 0 16px #FFE600); }
+  100% { filter: brightness(1); }
+}
+.flash-score {
+  animation: killFlash 0.75s ease-out;
+}
+
+/* Header speech bubble / tab pointers */
+.header-poly {
+  clip-path: polygon(0 0, 100% 0, 88% 100%, 0% 100%);
+}
+.elims-poly {
+  clip-path: polygon(14% 0, 100% 0, 86% 100%, 0% 100%);
+}
+.elims-notch {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid #54c7ec;
+}
+
+/* Subtle CRT scanline effect */
+.scanlines {
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0) 50%,
+    rgba(0, 0, 0, 0.22) 50%,
+    rgba(0, 0, 0, 0.22)
+  );
+  background-size: 100% 4px;
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F6C33B'><path d='M12 2L15 8L21 9L16.5 13.5L18 19.5L12 16L6 19.5L7.5 13.5L3 9L9 8L12 2Z'/></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Free Fire World Series • Live Standings Leaderboard</title>
+    <!-- Tailwind CSS v3 via CDN -->
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <!-- Google Fonts for authentic Esports broadcast styling -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,700;0,800;0,900;1,700;1,900&family=Rajdhani:wght@600;700;800&family=Teko:wght@600;700&display=swap" rel="stylesheet" />
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              esports: ['"Barlow Condensed"', 'sans-serif'],
+              teko: ['"Teko"', 'sans-serif'],
+              rajdhani: ['"Rajdhani"', 'sans-serif']
+            },
+            colors: {
+              'esports-gold': '#F6C33B',
+              'esports-purple': '#7B4BE5',
+              'esports-dark': '#150B28',
+              'cyan-header': '#5BE2FF',
+            }
+          }
+        }
+      }
+    </script>
+  </head>
+  <body class="bg-[#090513] text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

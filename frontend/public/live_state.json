@@ -1,0 +1,133 @@
+{
+  "match": {
+    "id": "ffws-live-match",
+    "map": "BERMUDA",
+    "status": "LIVE",
+    "lastSync": "2026-11-21T16:12:59.321Z",
+    "visionEngineActive": true,
+    "stats": {
+      "totalKills": 0,
+      "squadsAlive": 3,
+      "totalSquads": 3,
+      "totalPlayersAlive": 10
+    }
+  },
+  "leaderboard": [
+    {
+      "id": "squad-2",
+      "name": "TEAM PINK",
+      "color": "#FF2E93",
+      "colorName": "PINK",
+      "kills": 0,
+      "elims": 0,
+      "alive": 4,
+      "totalPlayers": 4,
+      "players": [
+        {
+          "slot": 5,
+          "name": "Player_5",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 6,
+          "name": "Player_6",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 7,
+          "name": "Player_7",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 8,
+          "name": "Player_8",
+          "kills": 0,
+          "alive": true
+        }
+      ],
+      "rank": 1,
+      "default_rank": 1
+    },
+    {
+      "id": "squad-3",
+      "name": "TEAM PURPLE",
+      "color": "#8A2BE2",
+      "colorName": "PURPLE",
+      "kills": 0,
+      "elims": 0,
+      "alive": 4,
+      "totalPlayers": 4,
+      "players": [
+        {
+          "slot": 9,
+          "name": "Player_9",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 10,
+          "name": "Player_10",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 11,
+          "name": "Player_11",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 12,
+          "name": "Player_12",
+          "kills": 0,
+          "alive": true
+        }
+      ],
+      "rank": 2,
+      "default_rank": 2
+    },
+    {
+      "id": "squad-1",
+      "name": "TEAM RED",
+      "color": "#FF2A2A",
+      "colorName": "RED",
+      "kills": 0,
+      "elims": 0,
+      "alive": 2,
+      "totalPlayers": 4,
+      "players": [
+        {
+          "slot": 1,
+          "name": "Player_1",
+          "kills": 0,
+          "alive": false
+        },
+        {
+          "slot": 2,
+          "name": "Player_2",
+          "kills": 0,
+          "alive": false
+        },
+        {
+          "slot": 3,
+          "name": "Player_3",
+          "kills": 0,
+          "alive": true
+        },
+        {
+          "slot": 4,
+          "name": "Player_4",
+          "kills": 0,
+          "alive": true
+        }
+      ],
+      "rank": 3,
+      "default_rank": 3
+    }
+  ],
+  "killFeed": [],
+  "pendingReviews": []
+}

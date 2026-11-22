@@ -1,0 +1,12 @@
+{
+  "1080p": {
+    "killfeed": { "x": 820, "y": 10, "width": 1090, "height": 220 },
+    "alive_counter": { "x": 890, "y": 5, "width": 140, "height": 35 },
+    "game_state_guard": { "x": 400, "y": 480, "width": 1120, "height": 120 }
+  },
+  "720p": {
+    "killfeed": { "x": 547, "y": 7, "width": 727, "height": 147 },
+    "alive_counter": { "x": 593, "y": 3, "width": 93, "height": 23 },
+    "game_state_guard": { "x": 267, "y": 320, "width": 747, "height": 80 }
+  }
+}

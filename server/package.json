@@ -1,0 +1,12 @@
+{
+  "name": "ff-live-kill-tracker-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-sqlite server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
+

@@ -1,0 +1,115 @@
+{
+  "matchId": "ffws-2025-gf-match-4",
+  "map": "BERMUDA",
+  "scoringRules": "KILLS_ONLY",
+  "teams": [
+    {
+      "id": "lyon", "name": "LYON", "tag": "LYON", "country": "Mexico", "logo": "logo-lyon", "flag": "flag-mexico",
+      "players": [
+        { "id": "lyon-1", "ign": "LyonKing", "normalizedSkeleton": "lyonking", "role": "IGL" },
+        { "id": "lyon-2", "ign": "Cazador", "normalizedSkeleton": "cazador", "role": "Rusher" },
+        { "id": "lyon-3", "ign": "Azteca", "normalizedSkeleton": "azteca", "role": "Sniper" },
+        { "id": "lyon-4", "ign": "Vortex", "normalizedSkeleton": "vortex", "role": "Support" }
+      ]
+    },
+    {
+      "id": "onic", "name": "ONIC", "tag": "ONIC", "country": "Indonesia", "logo": "logo-onic", "flag": "flag-indonesia",
+      "players": [
+        { "id": "onic-1", "ign": "Butsss", "normalizedSkeleton": "butsss", "role": "IGL" },
+        { "id": "onic-2", "ign": "Kairi", "normalizedSkeleton": "kairi", "role": "Rusher" },
+        { "id": "onic-3", "ign": "Sanz", "normalizedSkeleton": "sanz", "role": "Sniper" },
+        { "id": "onic-4", "ign": "CW", "normalizedSkeleton": "cw", "role": "Support" }
+      ]
+    },
+    {
+      "id": "ag", "name": "AG", "tag": "AG", "country": "Thailand", "logo": "logo-ag", "flag": "flag-thailand",
+      "players": [
+        { "id": "ag-1", "ign": "Cosmo", "normalizedSkeleton": "cosmo", "role": "IGL" },
+        { "id": "ag-2", "ign": "Mosz", "normalizedSkeleton": "mosz", "role": "Rusher" },
+        { "id": "ag-3", "ign": "Poon", "normalizedSkeleton": "poon", "role": "Sniper" },
+        { "id": "ag-4", "ign": "Draken", "normalizedSkeleton": "draken", "role": "Support" }
+      ]
+    },
+    {
+      "id": "bru", "name": "BRU", "tag": "BRU", "country": "Thailand", "logo": "logo-bru", "flag": "flag-thailand",
+      "players": [
+        { "id": "bru-1", "ign": "Wassana", "normalizedSkeleton": "wassana", "role": "IGL" },
+        { "id": "bru-2", "ign": "TheCruz", "normalizedSkeleton": "thecruz", "role": "Rusher" },
+        { "id": "bru-3", "ign": "Gethigh", "normalizedSkeleton": "gethigh", "role": "Sniper" },
+        { "id": "bru-4", "ign": "Godk", "normalizedSkeleton": "godk", "role": "Support" }
+      ]
+    },
+    {
+      "id": "fx", "name": "FX", "tag": "FX", "country": "Brazil", "logo": "logo-fx", "flag": "flag-brazil",
+      "players": [
+        { "id": "fx-1", "ign": "Nobru", "normalizedSkeleton": "nobru", "role": "IGL" },
+        { "id": "fx-2", "ign": "JapaBKR", "normalizedSkeleton": "japabkr", "role": "Rusher" },
+        { "id": "fx-3", "ign": "Syaz", "normalizedSkeleton": "syaz", "role": "Sniper" },
+        { "id": "fx-4", "ign": "Bops", "normalizedSkeleton": "bops", "role": "Support" }
+      ]
+    },
+    {
+      "id": "gow", "name": "GOW", "tag": "GOW", "country": "Vietnam", "logo": "logo-gow", "flag": "flag-vietnam",
+      "players": [
+        { "id": "gow-1", "ign": "Wolfie", "normalizedSkeleton": "wolfie", "role": "IGL" },
+        { "id": "gow-2", "ign": "Shadow", "normalizedSkeleton": "shadow", "role": "Rusher" },
+        { "id": "gow-3", "ign": "Darkness", "normalizedSkeleton": "darkness", "role": "Sniper" },
+        { "id": "gow-4", "ign": "Fang", "normalizedSkeleton": "fang", "role": "Support" }
+      ]
+    },
+    {
+      "id": "los", "name": "LOS", "tag": "LOS", "country": "Brazil", "logo": "logo-los", "flag": "flag-brazil",
+      "players": [
+        { "id": "los-1", "ign": "Ghost", "normalizedSkeleton": "ghost", "role": "IGL" },
+        { "id": "los-2", "ign": "Complex", "normalizedSkeleton": "complex", "role": "Rusher" },
+        { "id": "los-3", "ign": "Ruan", "normalizedSkeleton": "ruan", "role": "Sniper" },
+        { "id": "los-4", "ign": "Cebola", "normalizedSkeleton": "cebola", "role": "Support" }
+      ]
+    },
+    {
+      "id": "loud", "name": "LOUD", "tag": "LOUD", "country": "Brazil", "logo": "logo-loud", "flag": "flag-brazil",
+      "players": [
+        { "id": "loud-1", "ign": "Cauan7", "normalizedSkeleton": "cauan7", "role": "IGL" },
+        { "id": "loud-2", "ign": "Lost21", "normalizedSkeleton": "lost21", "role": "Rusher" },
+        { "id": "loud-3", "ign": "Mexico", "normalizedSkeleton": "mexico", "role": "Sniper" },
+        { "id": "loud-4", "ign": "Noda", "normalizedSkeleton": "noda", "role": "Support" }
+      ]
+    },
+    {
+      "id": "pe", "name": "PE", "tag": "PE", "country": "Vietnam", "logo": "logo-pe", "flag": "flag-vietnam",
+      "players": [
+        { "id": "pe-1", "ign": "Phan", "normalizedSkeleton": "phan", "role": "IGL" },
+        { "id": "pe-2", "ign": "Kaiser", "normalizedSkeleton": "kaiser", "role": "Rusher" },
+        { "id": "pe-3", "ign": "Tee", "normalizedSkeleton": "tee", "role": "Sniper" },
+        { "id": "pe-4", "ign": "Vinh", "normalizedSkeleton": "vinh", "role": "Support" }
+      ]
+    },
+    {
+      "id": "rrq", "name": "RRQ", "tag": "RRQ", "country": "Indonesia", "logo": "logo-rrq", "flag": "flag-indonesia",
+      "players": [
+        { "id": "rrq-1", "ign": "Legaeloth", "normalizedSkeleton": "legaeloth", "role": "IGL" },
+        { "id": "rrq-2", "ign": "Dutzz", "normalizedSkeleton": "dutzz", "role": "Rusher" },
+        { "id": "rrq-3", "ign": "Abay", "normalizedSkeleton": "abay", "role": "Sniper" },
+        { "id": "rrq-4", "ign": "Wings", "normalizedSkeleton": "wings", "role": "Support" }
+      ]
+    },
+    {
+      "id": "xp", "name": "XP", "tag": "XP", "country": "Morocco", "logo": "logo-xp", "flag": "flag-morocco",
+      "players": [
+        { "id": "xp-1", "ign": "Atlas", "normalizedSkeleton": "atlas", "role": "IGL" },
+        { "id": "xp-2", "ign": "Sahara", "normalizedSkeleton": "sahara", "role": "Rusher" },
+        { "id": "xp-3", "ign": "Sultan", "normalizedSkeleton": "sultan", "role": "Sniper" },
+        { "id": "xp-4", "ign": "Rabat", "normalizedSkeleton": "rabat", "role": "Support" }
+      ]
+    },
+    {
+      "id": "fl", "name": "FL", "tag": "FL", "country": "Vietnam", "logo": "logo-fl", "flag": "flag-vietnam",
+      "players": [
+        { "id": "fl-1", "ign": "Shin", "normalizedSkeleton": "shin", "role": "IGL" },
+        { "id": "fl-2", "ign": "Dnp", "normalizedSkeleton": "dnp", "role": "Rusher" },
+        { "id": "fl-3", "ign": "BeChanh", "normalizedSkeleton": "bechanh", "role": "Sniper" },
+        { "id": "fl-4", "ign": "Clear", "normalizedSkeleton": "clear", "role": "Support" }
+      ]
+    }
+  ]
+}
