@@ -3,13 +3,48 @@
     "id": "ffws-live-match",
     "map": "BERMUDA",
     "status": "LIVE",
-    "lastSync": "2026-11-22T12:18:30.773Z",
+    "lastSync": "2026-11-24T10:52:35.649Z",
     "visionEngineActive": true,
+    "spectatorHp": {
+      "teamName": "TEAM BLUE",
+      "teamColor": "#1E4BFF",
+      "avgHp": 73.4,
+      "players": [
+        {
+          "slot": 1,
+          "name": "Player_1",
+          "hp": 100,
+          "state": "ALIVE",
+          "raw_hp": 100
+        },
+        {
+          "slot": 2,
+          "name": "Player_2",
+          "hp": 0,
+          "state": "DEAD",
+          "raw_hp": 0
+        },
+        {
+          "slot": 3,
+          "name": "Player_3",
+          "hp": 93.7,
+          "state": "ALIVE",
+          "raw_hp": 94.91
+        },
+        {
+          "slot": 4,
+          "name": "Player_4",
+          "hp": 100,
+          "state": "ALIVE",
+          "raw_hp": 100
+        }
+      ]
+    },
     "stats": {
       "totalKills": 0,
       "squadsAlive": 3,
       "totalSquads": 3,
-      "totalPlayersAlive": 9
+      "totalPlayersAlive": 11
     }
   },
   "leaderboard": [
@@ -22,30 +57,48 @@
       "elims": 0,
       "alive": 4,
       "totalPlayers": 4,
+      "hp": 100,
+      "isSpectated": false,
       "players": [
         {
           "slot": 1,
           "name": "Player_1",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PINK",
+          "hex": "#FF2E93"
         },
         {
           "slot": 2,
           "name": "Player_2",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PINK",
+          "hex": "#FF2E93"
         },
         {
           "slot": 3,
           "name": "Player_3",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PINK",
+          "hex": "#FF2E93"
         },
         {
           "slot": 4,
           "name": "Player_4",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PINK",
+          "hex": "#FF2E93"
         }
       ],
       "rank": 1,
@@ -58,32 +111,50 @@
       "colorName": "PURPLE",
       "kills": 0,
       "elims": 0,
-      "alive": 3,
+      "alive": 4,
       "totalPlayers": 4,
+      "hp": 100,
+      "isSpectated": false,
       "players": [
         {
           "slot": 5,
           "name": "Player_5",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PURPLE",
+          "hex": "#8A2BE2"
         },
         {
           "slot": 6,
           "name": "Player_6",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PURPLE",
+          "hex": "#8A2BE2"
         },
         {
           "slot": 7,
           "name": "Player_7",
           "kills": 0,
-          "alive": false
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PURPLE",
+          "hex": "#8A2BE2"
         },
         {
           "slot": 8,
           "name": "Player_8",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "PURPLE",
+          "hex": "#8A2BE2"
         }
       ],
       "rank": 2,
@@ -96,38 +167,91 @@
       "colorName": "BLUE",
       "kills": 0,
       "elims": 0,
-      "alive": 2,
+      "alive": 3,
       "totalPlayers": 4,
+      "hp": 75,
+      "isSpectated": false,
       "players": [
         {
           "slot": 9,
           "name": "Player_9",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "BLUE",
+          "hex": "#1E4BFF"
         },
         {
           "slot": 10,
           "name": "Player_10",
           "kills": 0,
-          "alive": false
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "BLUE",
+          "hex": "#1E4BFF"
         },
         {
           "slot": 11,
           "name": "Player_11",
           "kills": 0,
-          "alive": true
+          "alive": true,
+          "hp": 100,
+          "hpState": "ALIVE",
+          "color": "BLUE",
+          "hex": "#1E4BFF"
         },
         {
           "slot": 12,
           "name": "Player_12",
           "kills": 0,
-          "alive": false
+          "alive": false,
+          "hp": 0,
+          "hpState": "DEAD",
+          "color": "DEAD",
+          "hex": "#555555"
         }
       ],
       "rank": 3,
       "default_rank": 3
     }
   ],
+  "spectatorHp": {
+    "teamName": "TEAM BLUE",
+    "teamColor": "#1E4BFF",
+    "avgHp": 73.4,
+    "players": [
+      {
+        "slot": 1,
+        "name": "Player_1",
+        "hp": 100,
+        "state": "ALIVE",
+        "raw_hp": 100
+      },
+      {
+        "slot": 2,
+        "name": "Player_2",
+        "hp": 0,
+        "state": "DEAD",
+        "raw_hp": 0
+      },
+      {
+        "slot": 3,
+        "name": "Player_3",
+        "hp": 93.7,
+        "state": "ALIVE",
+        "raw_hp": 94.91
+      },
+      {
+        "slot": 4,
+        "name": "Player_4",
+        "hp": 100,
+        "state": "ALIVE",
+        "raw_hp": 100
+      }
+    ]
+  },
   "killFeed": [],
   "pendingReviews": []
 }

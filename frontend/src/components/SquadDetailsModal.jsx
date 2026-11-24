@@ -53,26 +53,47 @@ export default function SquadDetailsModal({ squad, onClose, onAddKill }) {
         {/* Roster List */}
         <div className="mb-4">
           <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">
-            Active Lineup Roster
+            Active Lineup Roster & Health
           </div>
           <div className="grid grid-cols-2 gap-2">
             {squad.players.map((player, idx) => {
               const pName = typeof player === 'string' ? player : (player.name || `Player_${idx+1}`);
               const pKills = typeof player === 'object' && player.kills !== undefined ? player.kills : 0;
               const pAlive = typeof player === 'object' && player.alive !== undefined ? player.alive : true;
+              const pHp = typeof player === 'object' && typeof player.hp === 'number' ? Math.max(0, Math.min(100, player.hp)) : (pAlive ? 100 : 0);
+
+              let barColor = '#00e676';
+              if (!pAlive) barColor = '#424242';
+              else if (pHp <= 25) barColor = '#ff1744';
+              else if (pHp <= 50) barColor = '#ffd600';
 
               return (
                 <div 
                   key={idx}
-                  className={`flex items-center justify-between px-2.5 py-1.5 bg-[#1f113f] border ${pAlive ? 'border-purple-900/60' : 'border-red-950/40 opacity-50'} rounded text-xs`}
+                  className={`flex flex-col gap-1 px-2.5 py-1.5 bg-[#1f113f] border ${pAlive ? 'border-purple-900/60' : 'border-red-950/40 opacity-50'} rounded text-xs`}
                 >
-                  <div className="flex items-center gap-1.5">
-                    <span className={`w-2 h-2 rounded-full ${pAlive ? 'bg-emerald-400 shadow-[0_0_6px_#10b981]' : 'bg-gray-500'}`}></span>
-                    <span className={`font-bold ${pAlive ? 'text-gray-100' : 'text-gray-400 line-through'}`}>{pName}</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 truncate">
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${pAlive ? 'bg-emerald-400 shadow-[0_0_6px_#10b981]' : 'bg-gray-500'}`}></span>
+                      <span className={`font-bold truncate ${pAlive ? 'text-gray-100' : 'text-gray-400 line-through'}`}>{pName}</span>
+                    </div>
+                    <span className="text-[11px] text-amber-300 font-mono font-bold flex-shrink-0 ml-1">
+                      {pKills} {pKills === 1 ? 'kill' : 'kills'}
+                    </span>
                   </div>
-                  <span className="text-[11px] text-amber-300 font-mono font-bold">
-                    {pKills} {pKills === 1 ? 'kill' : 'kills'}
-                  </span>
+
+                  {/* Player HP Bar */}
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <div className="w-full h-1.5 bg-black/70 rounded-xs overflow-hidden">
+                      <div 
+                        className="h-full rounded-xs transition-all duration-300" 
+                        style={{ width: `${pHp}%`, backgroundColor: barColor }} 
+                      />
+                    </div>
+                    <span className="text-[10px] font-mono text-gray-300 font-bold w-9 text-right flex-shrink-0">
+                      {pHp.toFixed(0)}%
+                    </span>
+                  </div>
                 </div>
               );
             })}

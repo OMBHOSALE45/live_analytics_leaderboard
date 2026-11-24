@@ -9,8 +9,7 @@ export default function LeaderboardCard({
 }) {
   const ROW_HEIGHT = 56; // 48px row + 8px gap for clean spacing
 
-  // Authentic Free Fire 4 slanted player survival status bars (////)
-  // Each bar represents a squad member: filled/glowing if alive, dark/empty slot if dead
+  // Authentic Free Fire 4 slanted player survival status bars (////) with Live Health Telemetry
   const renderAliveBars = (team) => {
     const bars = [];
     const totalBars = 4;
@@ -18,16 +17,25 @@ export default function LeaderboardCard({
     const aliveCount = typeof team.alive === 'number' ? team.alive : 4;
 
     for (let i = 0; i < totalBars; i++) {
-      const isPlayerAlive = players[i] !== undefined 
-        ? Boolean(players[i].alive) 
-        : i < aliveCount;
+      const p = players[i];
+      const isPlayerAlive = p !== undefined ? Boolean(p.alive) : i < aliveCount;
+      const playerHp = p && typeof p.hp === 'number' ? p.hp : (isPlayerAlive ? 100 : 0);
 
       bars.push(
-        <span
+        <div
           key={i}
-          className={`elim-bar ${isPlayerAlive ? 'active' : 'inactive'}`}
-          title={`Squad Member ${i + 1}: ${isPlayerAlive ? 'ALIVE' : 'ELIMINATED'}`}
-        />
+          className="relative flex flex-col justify-end w-2.5 h-6 bg-gray-950/80 border border-purple-800/60 rounded-xs overflow-hidden transform -skew-x-[14deg]"
+          title={`Squad Member ${i + 1} (${p?.name || 'Player'}): ${playerHp.toFixed(1)}% HP [${isPlayerAlive ? 'ALIVE' : 'ELIMINATED'}]`}
+        >
+          <div
+            className="w-full transition-all duration-300 rounded-xs"
+            style={{
+              height: `${Math.max(0, Math.min(100, playerHp))}%`,
+              backgroundColor: !isPlayerAlive ? '#3a3a3a' : playerHp > 50 ? '#00e676' : playerHp > 25 ? '#ffeb3b' : '#ff1744',
+              boxShadow: isPlayerAlive && playerHp > 0 ? `0 0 5px ${playerHp > 50 ? '#00e676' : playerHp > 25 ? '#ffeb3b' : '#ff1744'}` : 'none'
+            }}
+          />
+        </div>
       );
     }
     return bars;
@@ -137,9 +145,40 @@ export default function LeaderboardCard({
                     </span>
 
                     {/* Alive count pill */}
-                    <span className="text-[15px] ml-5 font-bold px-2 py-0.5 rounded-lg bg-purple-950/80 border border-purple-700/50 text-cyan-300 font-mono">
+                    <span className="text-[14px] font-bold px-2 py-0.5 rounded-lg bg-purple-950/80 border border-purple-700/50 text-cyan-300 font-mono">
                       {team.alive ?? 4} ALIVE
                     </span>
+
+                    {/* Team Live Health Pill (Vision Sync) */}
+                    <div 
+                      className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-black/60 border border-purple-800/50 shadow-sm"
+                      title={`Live Squad HP: ${(team.hp ?? 100).toFixed(1)}%`}
+                    >
+                      <span className="text-[10px] font-mono font-bold text-gray-400">HP</span>
+                      <div className="w-10 h-2 bg-gray-900 rounded-xs overflow-hidden p-[1px] border border-gray-700">
+                        <div 
+                          className="h-full rounded-xs transition-all duration-300"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, team.hp ?? 100))}%`,
+                            backgroundColor: (team.hp ?? 100) > 50 ? '#00e676' : (team.hp ?? 100) > 25 ? '#ffeb3b' : '#ff1744',
+                            boxShadow: `0 0 4px ${(team.hp ?? 100) > 50 ? '#00e676' : (team.hp ?? 100) > 25 ? '#ffeb3b' : '#ff1744'}`
+                          }}
+                        />
+                      </div>
+                      <span 
+                        className="text-[11px] font-mono font-bold"
+                        style={{
+                          color: (team.hp ?? 100) > 50 ? '#69f0ae' : (team.hp ?? 100) > 25 ? '#ffff8d' : '#ff5252'
+                        }}
+                      >
+                        {Math.round(team.hp ?? 100)}%
+                      </span>
+                      {team.isSpectated && (
+                        <span className="text-[9px] uppercase font-bold tracking-wider px-1 bg-cyan-950 border border-cyan-500/60 text-cyan-300 rounded animate-pulse">
+                          LIVE
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   {/* Right Info: Elims count & Survival Tally Bars (4 per squad) */}

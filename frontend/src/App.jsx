@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import SvgDefs from './components/SvgDefs';
 import BroadcastHeader from './components/BroadcastHeader';
 import LeaderboardCard from './components/LeaderboardCard';
+import LiveSpectatorHealthCard from './components/LiveSpectatorHealthCard';
 import KillFeedPanel from './components/KillFeedPanel';
 import SquadDetailsModal from './components/SquadDetailsModal';
 import BroadcastFooter from './components/BroadcastFooter';
@@ -15,6 +16,7 @@ export default function App() {
     killFeed,
     pendingReviews,
     allEvents,
+    spectatorHp,
     matchInfo,
     connected,
     addKill,
@@ -223,6 +225,12 @@ export default function App() {
             onTeamClick={handleAddKill}
             flashTeamId={flashTeamId}
             onSelectSquad={(squad) => setSelectedSquad(squad)}
+          />
+
+          {/* Live Spectator Health Telemetry HUD */}
+          <LiveSpectatorHealthCard
+            spectatorHp={spectatorHp}
+            fallbackTeam={sortedTeams[0]}
           />
         </div>
 
