@@ -22,24 +22,26 @@ except ImportError:
 class BadgeColorEngine:
   """
   Esports Badge Color Classifier:
-  - 9-color Free Fire esports palette: RED, ORANGE, YELLOW, GREEN, CYAN, BLUE, PURPLE, PINK, GRAY
+  - 11-color Free Fire esports palette: RED, ORANGE, YELLOW, GREEN, MINT GREEN, CYAN, BLUE, PURPLE, PINK, BROWN, GRAY
   - Strict chroma + RGB-spread gating prevents cool-gray/silver badges from leaking into BLUE/CYAN
   - Dead / eliminated players are strictly categorized as DIMMED (#555555)
   - Zero color hallucination: dead rows never pollute team consensus
   """
 
-  # Canonical Free Fire esports tournament palette (including GRAY/SILVER team)
+  # Canonical Free Fire esports tournament palette (including MINT GREEN, BROWN, GRAY)
   PALETTE_HEX = {
-    "RED":      "#FF2A2A",
-    "ORANGE":   "#FF7F00",
-    "YELLOW":   "#FFD700",
-    "GREEN":    "#00D860",
-    "CYAN":     "#00E5FF",
-    "BLUE":     "#1E4BFF",
-    "PURPLE":   "#8A2BE2",
-    "PINK":     "#FF2E93",
-    "GRAY":     "#9EA7B0",
-    "DIMMED":   "#555555",
+    "RED":        "#FF2A2A",
+    "ORANGE":     "#FF7F00",
+    "YELLOW":     "#FFD700",
+    "GREEN":      "#00D860",
+    "MINT GREEN": "#5ED4AA",
+    "CYAN":       "#00E5FF",
+    "BLUE":       "#1E4BFF",
+    "PURPLE":     "#8A2BE2",
+    "PINK":       "#FF2E93",
+    "BROWN":      "#8A631A",
+    "GRAY":       "#9EA7B0",
+    "DIMMED":     "#555555",
   }
 
   def __init__(self, vote_window: int = 9, lock_threshold: int = 4):
@@ -57,7 +59,7 @@ class BadgeColorEngine:
     return (int(hx[4:6], 16), int(hx[2:4], 16), int(hx[0:2], 16))
 
   def reset_cache(self):
-    """Call this when recalibrating slots or starting a new match."""
+    """Call this when recalibrating slots, scrolling, or starting a new match."""
     self.slot_votes.clear()
     self.slot_locked.clear()
 
@@ -151,23 +153,27 @@ class BadgeColorEngine:
     fg_ratio = fg_count / float(total_px)
 
     if fg_count < 10 or fg_ratio < 0.16:
-      # Alive player with low-saturation badge -> GRAY team
       raw_name = "GRAY"
     else:
       med_hue = int(np.median(hue[vibrant]))
       med_sat = float(np.median(sat[vibrant]))
+      med_val = float(np.median(val[vibrant]))
       med_spread = float(np.median(spread[vibrant]))
 
-      # Free Fire Esports Standard Color Classification
+      # Free Fire Esports Standard Color Classification (11-color palette)
       if med_hue >= 345 or med_hue <= 18:
         raw_name = "RED"
+      elif 19 <= med_hue <= 50 and med_val < 175:
+        raw_name = "BROWN"
       elif 19 <= med_hue <= 42:
         raw_name = "ORANGE"
       elif 43 <= med_hue <= 70:
         raw_name = "YELLOW"
-      elif 71 <= med_hue <= 160:
+      elif 71 <= med_hue <= 149:
         raw_name = "GREEN"
-      elif 161 <= med_hue <= 200:
+      elif 150 <= med_hue <= 168:
+        raw_name = "MINT GREEN"
+      elif 169 <= med_hue <= 200:
         raw_name = "CYAN"
       elif 201 <= med_hue <= 245:
         raw_name = "BLUE"
@@ -182,7 +188,6 @@ class BadgeColorEngine:
       if raw_name in ("BLUE", "CYAN") and (med_sat < 115.0 or med_spread < 48.0):
         raw_name = "GRAY"
 
-    # Temporal voting for alive slots
     buf = self.slot_votes.setdefault(slot_idx, deque(maxlen=self.vote_window))
     buf.append(raw_name)
     winner, count = Counter(buf).most_common(1)[0]
@@ -922,21 +927,23 @@ class KillCountEngine:
 class ThreadedScoreboardDetector:
   """
   High-Performance Asynchronous Free Fire Scoreboard AI Tracker:
-  - Multithreaded: Main thread runs video capture & OpenCV display at native 30-60 FPS (Zero Stutter).
-  - Background Worker: Runs RapidOCR on video start to register team rosters, then tracks live
-    kill numbers and alive statuses using the bulletproof KillCountEngine + BadgeColorEngine.
-  - Anti-Merge Color Separation: Strictly distinguishes GRAY/SILVER teams from BLUE teams and
-    enforces unique team identities across visible squads so kills never merge.
+  - Lobby Registration -> Match Lock ('l' key): Scroll through all teams in the lobby
+    to register them permanently, then press 'l' to lock the roster for the match.
+  - Zero Duplicates: Canonical color keying updates existing teams in-place on return.
+  - Permanent Dead Teams: Eliminated squads stay on the leaderboard at 0 alive / 0.0 HP [DEAD].
+  - 12-Team OpenCV Leaderboard: Displays up to 12 tracked teams simultaneously on screen.
   """
   def __init__(
     self,
     server_url: str = "http://localhost:3001",
-    sync_interval: float = 1.2
+    sync_interval: float = 1.2,
+    max_display_teams: int = 12
   ):
     os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
     os.environ['no_proxy'] = 'localhost,127.0.0.1'
     self.server_url = server_url.replace("localhost", "127.0.0.1")
     self.sync_interval = sync_interval
+    self.max_display_teams = max_display_teams
     self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     self.color_engine = BadgeColorEngine(vote_window=9, lock_threshold=5)
 
@@ -963,8 +970,16 @@ class ThreadedScoreboardDetector:
     self.has_initial_roster = False
     self.ocr_attempts = 0
 
+    # Persistent team memory across scoreboard scrolls: canonical colorName -> team dict
+    self.persistent_teams: Dict[str, Dict[str, Any]] = {}
+    self.roster_locked: bool = False  # False = Lobby Registration, True = Match Locked
+    self.prev_slot1_small: Optional[np.ndarray] = None
+    self.scroll_settling_frames: int = 0
+    self.scroll_diff_threshold: float = 14.0
+
     self.hp_pipeline = None
     try:
+      sys.path.append(os.path.abspath(self.project_root))
       sys.path.append(os.path.abspath(os.path.join(self.project_root, '..')))
       from hp_tracker.core.hp_pipeline import HPTrackerPipeline
       self.hp_pipeline = HPTrackerPipeline()
@@ -988,6 +1003,25 @@ class ThreadedScoreboardDetector:
     with self.lock:
       self.kill_engine.reset()
       self.last_synced_total_kills = -1
+
+  def clear_persistent_teams(self):
+    """Clears all stored teams and unlocks back to Lobby Registration Mode."""
+    with self.lock:
+      self.persistent_teams.clear()
+      self.roster_locked = False
+      self.kill_engine.reset()
+      self.color_engine.reset_cache()
+      self.squad_locks.clear()
+      self.cached_player_names.clear()
+      self.last_synced_total_kills = -1
+    print("[Leaderboard] Cleared teams -> LOBBY REGISTRATION MODE.", flush=True)
+
+  def toggle_roster_lock(self):
+    """Locks registered lobby teams for the match (press 'l')."""
+    with self.lock:
+      self.roster_locked = not self.roster_locked
+      state = "MATCH LOCKED" if self.roster_locked else "LOBBY REGISTRATION"
+      print(f"[Leaderboard] Mode -> {state} ({len(self.persistent_teams)} teams registered)", flush=True)
 
   def _load_saved_calibration(self):
     calib_file = os.path.join(self.project_root, 'slot_calibration.json')
@@ -1042,10 +1076,6 @@ class ThreadedScoreboardDetector:
           print(f"[AutoServer Warning] Could not auto-launch server: {e}")
 
   def extract_exact_badge_color(self, badge_bgr: np.ndarray) -> Tuple[str, str]:
-    """
-    Extracts the exact Free Fire squad color from chromatic badge pixels,
-    strictly separating GRAY/SILVER badges from BLUE/CYAN badges.
-    """
     if badge_bgr is None or badge_bgr.size == 0:
       return "UNKNOWN", "#888888"
 
@@ -1068,17 +1098,22 @@ class ThreadedScoreboardDetector:
     hues = hsv[:, :, 0][chroma_mask].astype(int) * 2
     med_hue = int(np.median(hues))
     med_sat = float(np.median(sat[chroma_mask]))
+    med_val = float(np.median(val[chroma_mask]))
     med_spread = float(np.median(spread[chroma_mask]))
 
     if med_hue >= 345 or med_hue <= 18:
       return "RED", "#FF2A2A"
+    elif 19 <= med_hue <= 50 and med_val < 175:
+      return "BROWN", self.color_engine.hex_map.get("BROWN", "#8A631A")
     elif 19 <= med_hue <= 42:
       return "ORANGE", "#FF7F00"
     elif 43 <= med_hue <= 70:
       return "YELLOW", "#FFD700"
-    elif 71 <= med_hue <= 160:
+    elif 71 <= med_hue <= 149:
       return "GREEN", "#00D860"
-    elif 161 <= med_hue <= 245:
+    elif 150 <= med_hue <= 168:
+      return "MINT GREEN", self.color_engine.hex_map.get("MINT GREEN", "#5ED4AA")
+    elif 169 <= med_hue <= 245:
       if med_sat < 115.0 or med_spread < 48.0:
         return "GRAY", "#9EA7B0"
       return ("CYAN", "#00E5FF") if med_hue <= 200 else ("BLUE", "#1E4BFF")
@@ -1126,6 +1161,7 @@ class ThreadedScoreboardDetector:
       self.cached_player_names.clear()
       self.color_engine.reset_cache()
       self.squad_locks.clear()
+      self.prev_slot1_small = None
       self.reset_kill_tracker()
 
     print("\n[Calibration] Select SLOT 2: Kills column area, then press ENTER or SPACE...")
@@ -1141,6 +1177,35 @@ class ThreadedScoreboardDetector:
       ]
       self.reset_kill_tracker()
       self._save_calibration()
+
+  def _detect_scoreboard_scroll(self, slot1_bgr: np.ndarray) -> bool:
+    """
+    Detects when the spectator scrolls the scoreboard list up or down.
+    On scroll, resets row-level kill & color caches so old rows don't bleed into new teams,
+    while keeping `self.persistent_teams` completely intact.
+    """
+    gray = cv2.cvtColor(slot1_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (32, 120), interpolation=cv2.INTER_AREA)
+
+    if self.prev_slot1_small is None:
+      self.prev_slot1_small = small
+      return False
+
+    mean_diff = float(np.mean(cv2.absdiff(small, self.prev_slot1_small)))
+    self.prev_slot1_small = small
+
+    if mean_diff >= self.scroll_diff_threshold:
+      # Scroll motion detected: reset row-indexed state and wait 6 ticks to settle cleanly
+      self.scroll_settling_frames = 6
+      self.kill_engine.reset()
+      self.color_engine.reset_cache()
+      self.squad_locks.clear()
+      self.cached_player_names.clear()
+      self.has_initial_roster = False
+      self.ocr_attempts = 0
+      return True
+
+    return False
 
   def _ai_worker_loop(self):
     while self.running:
@@ -1160,6 +1225,12 @@ class ThreadedScoreboardDetector:
         slot2 = frame[s2_coords[1]:s2_coords[3], s2_coords[0]:s2_coords[2]]
 
         if slot1.size == 0 or slot2.size == 0:
+          time.sleep(0.05)
+          continue
+
+        # Scroll Guard: detect scoreboard scroll and allow rows to settle cleanly
+        is_moving = self._detect_scoreboard_scroll(slot1)
+        if is_moving:
           time.sleep(0.05)
           continue
 
@@ -1233,7 +1304,7 @@ class ThreadedScoreboardDetector:
             'y_range': (y_start, y_end)
           })
 
-        # Pass 2: Squad-Level Color Consensus (GRAY is a first-class team color)
+        # Pass 2: Squad-Level Color Consensus
         squad_drafts = []
         for sq_idx in range(num_squads):
           squad_rows = [p for p in raw_players if p['squad_idx'] == sq_idx]
@@ -1280,7 +1351,6 @@ class ThreadedScoreboardDetector:
           })
 
         # Pass 2B: Anti-Merge Duplicate Color Resolution across visible squads
-        # Ensures GRAY and BLUE (or any two squads) can NEVER share the same team name/color
         color_groups: Dict[str, List[Dict[str, Any]]] = {}
         for d in squad_drafts:
           color_groups.setdefault(d['color'], []).append(d)
@@ -1289,7 +1359,6 @@ class ThreadedScoreboardDetector:
         for col_name, group in color_groups.items():
           if len(group) <= 1:
             continue
-          # Highest chroma squad keeps the chromatic color
           group.sort(key=lambda g: g['chroma'], reverse=True)
           for loser in group[1:]:
             if "GRAY" not in used_colors and loser['chroma'] < 45.0:
@@ -1298,18 +1367,17 @@ class ThreadedScoreboardDetector:
               used_colors.add("GRAY")
               self.squad_locks[loser['sq_idx']] = ("GRAY", loser['hex'])
             else:
-              # Fallback unique label so backend/frontend NEVER merges their kills
-              loser['display_name'] = f"TEAM {col_name} #{loser['sq_idx'] + 1}"
+              # Do NOT create "TEAM COLOR #2" duplicates in persistent memory
+              loser['skip_persist'] = True
 
-        # Pass 3: Build final player & team structures
+        # Pass 3: Build currently visible player & team structures
         parsed_players = []
-        ranked_teams = []
+        visible_teams: Dict[str, Dict[str, Any]] = {}
         for d in squad_drafts:
-          sq_idx = d['sq_idx']
           squad_rows = d['rows']
           sq_color = d['color']
           sq_hex = d['hex']
-          team_display = d.get('display_name', f"TEAM {sq_color}")
+          team_display = f"TEAM {sq_color}"
 
           for p in squad_rows:
             if p['alive']:
@@ -1322,15 +1390,23 @@ class ThreadedScoreboardDetector:
             p['squadHex'] = sq_hex
             parsed_players.append(p)
 
+          # Skip transient duplicate-color collisions so they never pollute persistent_teams
+          if d.get('skip_persist') or sq_color in ("UNKNOWN", "DIMMED"):
+            continue
+
           sq_kills = sum(p['kills'] for p in squad_rows)
           sq_alive = sum(1 for p in squad_rows if p['alive'])
-          ranked_teams.append({
-            'id': f"squad-{sq_idx + 1}",
+
+          # Canonical key = sq_color (guarantees 1 entry per team, updates in place on return)
+          visible_teams[sq_color] = {
+            'id': f"team-{sq_color.lower().replace(' ', '-')}",
             'name': team_display,
             'color': sq_hex,
             'colorName': sq_color,
             'kills': sq_kills,
             'alive': sq_alive,
+            'isVisible': True,
+            'lastSeen': now,
             'players': [{
               'slot': p['slot'],
               'name': p['name'],
@@ -1340,8 +1416,43 @@ class ThreadedScoreboardDetector:
               'hex': p['hex'],
               'hp': p.get('hp', 100.0 if p['alive'] else 0.0)
             } for p in squad_rows]
-          })
+          }
 
+        # Pass 3B: Lobby Registration & Match-Locked In-Place Updates
+        if self.scroll_settling_frames > 0:
+          self.scroll_settling_frames -= 1
+        else:
+          for t_key, t_obj in self.persistent_teams.items():
+            if t_key not in visible_teams:
+              t_obj['isVisible'] = False
+
+          for t_key, t_obj in visible_teams.items():
+            # If roster is locked for the match, ignore unregistered/phantom colors
+            if self.roster_locked and t_key not in self.persistent_teams:
+              continue
+
+            # If team is completely dead (0 alive), NEVER remove it: force all players to 0 HP & DEAD
+            if t_obj['alive'] == 0:
+              t_obj['eliminated'] = True
+              for pl in t_obj['players']:
+                pl['alive'] = False
+                pl['hp'] = 0.0
+                pl['color'] = 'DEAD'
+                pl['hex'] = '#555555'
+            else:
+              t_obj['eliminated'] = False
+
+            # Preserve previous kills if a dead/dimmed team briefly reads lower
+            if t_key in self.persistent_teams:
+              prev = self.persistent_teams[t_key]
+              if t_obj['alive'] == 0 and t_obj['kills'] < prev['kills']:
+                t_obj['kills'] = prev['kills']
+
+            # Update existing team in-place (or register new team in Lobby Mode)
+            self.persistent_teams[t_key] = t_obj
+
+        # Build unified ranked leaderboard from all persistent teams (live + scrolled-off + dead)
+        ranked_teams = [dict(t) for t in self.persistent_teams.values()]
         ranked_teams.sort(key=lambda t: (t['kills'], t['alive']), reverse=True)
         for rank_idx, t in enumerate(ranked_teams):
           t['rank'] = rank_idx + 1
@@ -1499,21 +1610,39 @@ class ThreadedScoreboardDetector:
     cv2.putText(preview, hud_text, (18, 24),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 255), 1, cv2.LINE_AA)
 
-    panel_w = 295
-    panel_h = 45 + (len(teams) * 28)
-    cv2.rectangle(preview, (15, 50), (15 + panel_w, 50 + panel_h), (20, 14, 32), -1)
-    cv2.rectangle(preview, (15, 50), (15 + panel_w, 50 + panel_h), (120, 80, 180), 1)
-    cv2.putText(preview, "LIVE LEADERBOARD (KILLS)", (25, 72),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 230, 255), 1, cv2.LINE_AA)
+    # 12-Team Persistent Leaderboard Sidebar (Lobby Registration & Match-Locked Mode)
+    display_teams = teams[:self.max_display_teams]
+    row_step = 22
+    panel_w = 365
+    panel_h = 38 + (max(1, len(display_teams)) * row_step)
+    cv2.rectangle(preview, (15, 44), (15 + panel_w, 44 + panel_h), (20, 14, 32), -1)
+    cv2.rectangle(preview, (15, 44), (15 + panel_w, 44 + panel_h), (120, 80, 180), 1)
 
-    for idx, t in enumerate(teams):
-      y_pos = 98 + (idx * 28)
+    mode_tag = "LOCKED" if self.roster_locked else "LOBBY ['l' LOCK]"
+    cv2.putText(
+      preview,
+      f"LEADERBOARD ({len(teams)} TEAMS) | {mode_tag}",
+      (25, 64),
+      cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 140) if self.roster_locked else (0, 230, 255), 1, cv2.LINE_AA
+    )
+
+    for idx, t in enumerate(display_teams):
+      y_pos = 86 + (idx * row_step)
       t_bgr = self.color_engine.hex_to_bgr(t['color'])
+      is_vis = t.get('isVisible', True)
+      is_dead = (t.get('alive', 0) == 0)
 
-      cv2.rectangle(preview, (25, y_pos - 12), (32, y_pos + 4), t_bgr, -1)
-      row_str = f"#{t['rank']} {t['name']:13s} {t['kills']} Kills ({t['alive']} alive)"
+      cv2.rectangle(preview, (25, y_pos - 10), (32, y_pos + 3), (65, 65, 65) if is_dead else t_bgr, -1)
+      if is_dead:
+        txt_col = (110, 110, 115)
+        tag = " [DEAD]"
+      else:
+        txt_col = (255, 255, 255) if is_vis else (175, 180, 195)
+        tag = "" if is_vis else " [SAVED]"
+
+      row_str = f"#{t['rank']:<2} {t['name']:15s} {t['kills']}K ({t['alive']} alive){tag}"
       cv2.putText(preview, row_str, (38, y_pos),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.40, txt_col, 1, cv2.LINE_AA)
 
     hp_res = res.get('hp_result')
     if hp_res and self.hp_pipeline is not None:
@@ -1534,7 +1663,7 @@ def run_live_scoreboard(
   print(f" Source: {source} | Sync Cadence: {sync_gap}s | Backend: {server_url}", flush=True)
   print("=" * 72, flush=True)
 
-  detector = ThreadedScoreboardDetector(server_url=server_url, sync_interval=sync_gap)
+  detector = ThreadedScoreboardDetector(server_url=server_url, sync_interval=sync_gap, max_display_teams=12)
 
   is_image = False
   cap = None
@@ -1592,12 +1721,12 @@ def run_live_scoreboard(
     if sample_f is not None:
       detector.interactive_calibrate_slots(sample_f)
 
-  window_name = "Free Fire Live Scoreboard Tracker [Press 'q' to Quit, 's' to Select Slots]"
+  window_name = "Free Fire Live Scoreboard Tracker ['q' Quit | 's' Slots | 'l' Lock Roster | 'c' Clear]"
   if display:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
 
-  print("\n[Tracker Active] Live video loop running at native FPS. Press 'q' to exit.\n")
+  print("\n[Tracker Active] Controls: 'l' = Lock/Unlock Roster | 's' = Select Slots | 'c' = Clear Teams | 'q' = Quit\n")
 
   frame_interval = 1.0 / target_fps
   last_frame_time = time.time()
@@ -1638,6 +1767,10 @@ def run_live_scoreboard(
           break
         elif key == ord('s'):
           detector.interactive_calibrate_slots(frame)
+        elif key == ord('l'):
+          detector.toggle_roster_lock()
+        elif key == ord('c'):
+          detector.clear_persistent_teams()
 
       proc_time = time.time() - loop_start
       sleep_dur = frame_interval - proc_time
