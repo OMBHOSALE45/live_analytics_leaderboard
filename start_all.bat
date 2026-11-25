@@ -18,9 +18,14 @@ start http://localhost:3001
 
 :: 4. Start Python Vision Engine
 echo [3/3] Starting Vision Engine (OpenCV + ONNX OCR)...
-echo Press 'q' in OpenCV window to quit, or 's' to re-calibrate slots.
+echo Controls:
+echo   - Press 'b' or 'h' to Plot Spectator HP Border (Masking)
+echo   - Press 's' to Select / Calibrate Scoreboard Slots
+echo   - Press 'q' to Quit
 echo.
-python vision-engine\scoreboard_detector.py --source .\Assets\video_1.mp4 --display
+set VIDEO_SRC=vision-engine\Assets\video_4.mp4
+if not "%~1"=="" set VIDEO_SRC=%~1
+python vision-engine\scoreboard_detector.py --source %VIDEO_SRC% --display
 
 pause
 

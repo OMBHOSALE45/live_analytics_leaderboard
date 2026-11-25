@@ -14,6 +14,7 @@ export class ScoreboardStore {
     this.totalKills = 0;
     this.squadsAlive = 0;
     this.totalPlayersAlive = 0;
+    this.spectatorHp = null;
   }
 
   reset() {
@@ -24,6 +25,7 @@ export class ScoreboardStore {
     this.totalKills = 0;
     this.squadsAlive = 0;
     this.totalPlayersAlive = 0;
+    this.spectatorHp = null;
     return this.getState();
   }
 
@@ -35,6 +37,9 @@ export class ScoreboardStore {
     this.matchId = payload.matchId || this.matchId;
     this.status = 'LIVE';
     this.lastSyncTime = new Date().toISOString();
+    if (payload.spectatorHp) {
+      this.spectatorHp = payload.spectatorHp;
+    }
 
     // Map incoming teams
     const updatedTeams = payload.teams.map((rawTeam, idx) => {
@@ -46,6 +51,27 @@ export class ScoreboardStore {
         ? rawTeam.alive 
         : players.filter(p => p.alive !== false).length;
 
+      const mappedPlayers = players.map((p, pIdx) => {
+        const isAlive = p.alive !== false;
+        const playerHp = typeof p.hp === 'number' ? Math.round(p.hp * 10) / 10 : (isAlive ? 100 : 0);
+        return {
+          slot: p.slot || pIdx + 1,
+          name: p.name || `Player_${pIdx + 1}`,
+          kills: p.kills || 0,
+          alive: isAlive,
+          hp: playerHp,
+          hpState: p.hp_state || p.state || (isAlive ? 'ALIVE' : 'DEAD'),
+          color: p.color,
+          hex: p.hex
+        };
+      });
+
+      const teamAvgHp = rawTeam.hp !== undefined
+        ? rawTeam.hp
+        : (mappedPlayers.length > 0 
+            ? Math.round(mappedPlayers.reduce((s, p) => s + p.hp, 0) / mappedPlayers.length) 
+            : 100);
+
       return {
         id: rawTeam.id || `team-${(rawTeam.colorName || `team_${idx}`).toLowerCase()}`,
         name: rawTeam.name || `TEAM ${rawTeam.colorName || idx + 1}`,
@@ -54,13 +80,10 @@ export class ScoreboardStore {
         kills: computedKills,
         elims: computedKills, // For compatibility with existing UI
         alive: computedAlive,
-        totalPlayers: players.length || 4,
-        players: players.map(p => ({
-          slot: p.slot || 1,
-          name: p.name || 'Unknown',
-          kills: p.kills || 0,
-          alive: p.alive !== false
-        }))
+        totalPlayers: mappedPlayers.length || 4,
+        hp: teamAvgHp,
+        isSpectated: Boolean(rawTeam.isSpectated),
+        players: mappedPlayers
       };
     });
 
@@ -94,6 +117,7 @@ export class ScoreboardStore {
         status: this.status,
         lastSync: this.lastSyncTime,
         visionEngineActive: isVisionActive,
+        spectatorHp: this.spectatorHp,
         stats: {
           totalKills: this.totalKills,
           squadsAlive: this.squadsAlive,
@@ -102,6 +126,7 @@ export class ScoreboardStore {
         }
       },
       leaderboard: this.teams,
+      spectatorHp: this.spectatorHp,
       killFeed: [],
       pendingReviews: []
     };

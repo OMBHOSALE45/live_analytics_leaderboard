@@ -6,6 +6,7 @@ export function useLeaderboard() {
   const [killFeed, setKillFeed] = useState([]);
   const [pendingReviews, setPendingReviews] = useState([]);
   const [allEvents, setAllEvents] = useState([]);
+  const [spectatorHp, setSpectatorHp] = useState(null);
   const [connected, setConnected] = useState(false);
   const [matchInfo, setMatchInfo] = useState({
     id: 'ffws-live-match',
@@ -35,7 +36,16 @@ export function useLeaderboard() {
       alive: st.alive ?? (st.players ? st.players.filter(p => p.alive !== false).length : 0),
       totalPlayers: st.totalPlayers || (st.players ? st.players.length : 4),
       damage: st.damage ?? 0,
-      players: st.players || []
+      hp: typeof st.hp === 'number' ? st.hp : 100,
+      isSpectated: Boolean(st.isSpectated),
+      players: (st.players || []).map((p, pIdx) => ({
+        slot: p.slot || pIdx + 1,
+        name: p.name || `Player_${pIdx + 1}`,
+        kills: p.kills || 0,
+        alive: p.alive !== false,
+        hp: typeof p.hp === 'number' ? p.hp : (p.alive !== false ? 100 : 0),
+        hpState: p.hpState || p.hp_state || (p.alive !== false ? 'ALIVE' : 'DEAD')
+      }))
     }));
   }, []);
 
@@ -45,6 +55,12 @@ export function useLeaderboard() {
 
     if (Array.isArray(data.leaderboard)) {
       setTeams(mapServerTeams(data.leaderboard));
+    }
+
+    if (data.spectatorHp) {
+      setSpectatorHp(data.spectatorHp);
+    } else if (data.match?.spectatorHp) {
+      setSpectatorHp(data.match.spectatorHp);
     }
 
     if (Array.isArray(data.killFeed)) {
@@ -287,6 +303,7 @@ export function useLeaderboard() {
     killFeed,
     pendingReviews,
     allEvents,
+    spectatorHp,
     matchInfo,
     connected,
     addKill,

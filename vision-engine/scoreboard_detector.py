@@ -17,27 +17,31 @@ try:
 except ImportError:
   RapidOCR = None
 
-"""Bagde colour engine"""
+
+"""Badge colour engine"""
 class BadgeColorEngine:
   """
   Esports Badge Color Classifier:
-  - 8-color Free Fire esports palette: RED, ORANGE, YELLOW, GREEN, CYAN, BLUE, PURPLE, PINK
-  - High-chroma Hue clustering on confirmed alive players
-  - Dead / eliminated players are strictly categorized as DIMMED / GRAY (#555555)
+  - 11-color Free Fire esports palette: RED, ORANGE, YELLOW, GREEN, MINT GREEN, CYAN, BLUE, PURPLE, PINK, BROWN, GRAY
+  - Strict chroma + RGB-spread gating prevents cool-gray/silver badges from leaking into BLUE/CYAN
+  - Dead / eliminated players are strictly categorized as DIMMED (#555555)
   - Zero color hallucination: dead rows never pollute team consensus
   """
 
-  # Canonical 8-color Free Fire esports tournament palette
+  # Canonical Free Fire esports tournament palette (including MINT GREEN, BROWN, GRAY)
   PALETTE_HEX = {
-    "RED":      "#FF2A2A",
-    "ORANGE":   "#FF7F00",
-    "YELLOW":   "#FFD700",
-    "GREEN":    "#00D860",
-    "CYAN":     "#00E5FF",
-    "BLUE":     "#1E4BFF",
-    "PURPLE":   "#8A2BE2",
-    "PINK":     "#FF2E93",
-    "DIMMED":   "#555555",
+    "RED":        "#FF2A2A",
+    "ORANGE":     "#FF7F00",
+    "YELLOW":     "#FFD700",
+    "GREEN":      "#00D860",
+    "MINT GREEN": "#5ED4AA",
+    "CYAN":       "#00E5FF",
+    "BLUE":       "#1E4BFF",
+    "PURPLE":     "#8A2BE2",
+    "PINK":       "#FF2E93",
+    "BROWN":      "#8A631A",
+    "GRAY":       "#9EA7B0",
+    "DIMMED":     "#555555",
   }
 
   def __init__(self, vote_window: int = 9, lock_threshold: int = 4):
@@ -55,7 +59,7 @@ class BadgeColorEngine:
     return (int(hx[4:6], 16), int(hx[2:4], 16), int(hx[0:2], 16))
 
   def reset_cache(self):
-    """Call this when recalibrating slots or starting a new match."""
+    """Call this when recalibrating slots, scrolling, or starting a new match."""
     self.slot_votes.clear()
     self.slot_locked.clear()
 
@@ -65,6 +69,50 @@ class BadgeColorEngine:
     lab = cv2.cvtColor(slot1_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     flat = lab.reshape(-1, 3)
     return np.median(flat, axis=0)
+
+  @staticmethod
+  def _crop_badge_interior(badge_bgr: np.ndarray) -> np.ndarray:
+    """Trims outer 15% borders to reject row dividers, highlights, and edge bleed."""
+    if badge_bgr is None or badge_bgr.size == 0:
+      return badge_bgr
+    bh, bw = badge_bgr.shape[:2]
+    mx = max(1, int(bw * 0.15)) if bw >= 10 else 0
+    my = max(1, int(bh * 0.15)) if bh >= 10 else 0
+    inner = badge_bgr[my:bh - my, mx:bw - mx]
+    return inner if inner.size > 0 else badge_bgr
+
+  @classmethod
+  def measure_badge_chroma(cls, badge_bgr: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Measures chromatic strength of a badge interior.
+    Returns: (vibrant_ratio, median_sat_of_bright, median_rgb_spread_of_bright)
+    """
+    if badge_bgr is None or badge_bgr.size == 0:
+      return 0.0, 0.0, 0.0
+
+    inner = cls._crop_badge_interior(badge_bgr)
+    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1].astype(np.float32)
+    val = hsv[:, :, 2].astype(np.float32)
+
+    b_ch = inner[:, :, 0].astype(np.int16)
+    g_ch = inner[:, :, 1].astype(np.int16)
+    r_ch = inner[:, :, 2].astype(np.int16)
+    spread = (np.maximum(np.maximum(b_ch, g_ch), r_ch) - np.minimum(np.minimum(b_ch, g_ch), r_ch)).astype(np.float32)
+
+    vibrant = (sat >= 105.0) & (val >= 65.0) & (spread >= 42.0)
+    total_px = float(max(1, inner.shape[0] * inner.shape[1]))
+    vibrant_ratio = float(np.count_nonzero(vibrant)) / total_px
+
+    bright = val >= 75.0
+    if np.any(bright):
+      med_sat = float(np.median(sat[bright]))
+      med_spread = float(np.median(spread[bright]))
+    else:
+      med_sat = 0.0
+      med_spread = 0.0
+
+    return vibrant_ratio, med_sat, med_spread
 
   def extract_row_color(
     self,
@@ -77,47 +125,69 @@ class BadgeColorEngine:
     """
     Extracts the foreground badge color for a single row.
     Returns: (color_name, hex_color)
-    Strict rule: If player is NOT alive, returns ('DIMMED', '#555555').
+    Strict rules:
+      - If player is NOT alive -> ('DIMMED', '#555555').
+      - If player IS alive and badge is achromatic/low-saturation -> ('GRAY', '#9EA7B0').
+      - Never allows cool-gray/silver compression tint to leak into BLUE/CYAN.
     """
     if not is_alive or badge_bgr is None or badge_bgr.size == 0:
       return "DIMMED", "#555555"
 
-    hsv = cv2.cvtColor(badge_bgr, cv2.COLOR_BGR2HSV)
+    inner = self._crop_badge_interior(badge_bgr)
+    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
     sat = hsv[:, :, 1]
     val = hsv[:, :, 2]
     hue = hsv[:, :, 0].astype(np.int32) * 2
 
-    # Filter for vibrant saturated pixels (rejecting dark background, shadows, white borders)
-    vibrant = (sat > 60) & (val > 60)
+    # RGB channel spread rejects cool-gray/silver badges that have low R/G/B separation
+    b_ch = inner[:, :, 0].astype(np.int16)
+    g_ch = inner[:, :, 1].astype(np.int16)
+    r_ch = inner[:, :, 2].astype(np.int16)
+    spread = np.maximum(np.maximum(b_ch, g_ch), r_ch) - np.minimum(np.minimum(b_ch, g_ch), r_ch)
+
+    total_px = max(1, inner.shape[0] * inner.shape[1])
+
+    # Strict vibrant chromatic mask (rejects gray/silver badges, dark shadows, white digits)
+    vibrant = (sat >= 105) & (val >= 65) & (spread >= 42)
     fg_count = int(np.count_nonzero(vibrant))
-    if fg_count < 8:
-      return "DIMMED", "#555555"
+    fg_ratio = fg_count / float(total_px)
 
-    med_hue = int(np.median(hue[vibrant]))
-
-    # Free Fire Esports Standard Color Classification
-    if med_hue >= 345 or med_hue <= 18:
-      raw_name = "RED"
-    elif 19 <= med_hue <= 42:
-      raw_name = "ORANGE"
-    elif 43 <= med_hue <= 70:
-      raw_name = "YELLOW"
-    elif 71 <= med_hue <= 160:
-      raw_name = "GREEN"
-    elif 161 <= med_hue <= 200:
-      raw_name = "CYAN"
-    elif 201 <= med_hue <= 245:
-      raw_name = "BLUE"
-    elif 246 <= med_hue <= 295:
-      raw_name = "PURPLE"
-    elif 296 <= med_hue <= 344:
-      raw_name = "PINK"
+    if fg_count < 10 or fg_ratio < 0.16:
+      raw_name = "GRAY"
     else:
-      raw_name = "CYAN"
+      med_hue = int(np.median(hue[vibrant]))
+      med_sat = float(np.median(sat[vibrant]))
+      med_val = float(np.median(val[vibrant]))
+      med_spread = float(np.median(spread[vibrant]))
 
-    raw_hex = self.hex_map[raw_name]
+      # Free Fire Esports Standard Color Classification (11-color palette)
+      if med_hue >= 345 or med_hue <= 18:
+        raw_name = "RED"
+      elif 19 <= med_hue <= 50 and med_val < 175:
+        raw_name = "BROWN"
+      elif 19 <= med_hue <= 42:
+        raw_name = "ORANGE"
+      elif 43 <= med_hue <= 70:
+        raw_name = "YELLOW"
+      elif 71 <= med_hue <= 149:
+        raw_name = "GREEN"
+      elif 150 <= med_hue <= 168:
+        raw_name = "MINT GREEN"
+      elif 169 <= med_hue <= 200:
+        raw_name = "CYAN"
+      elif 201 <= med_hue <= 245:
+        raw_name = "BLUE"
+      elif 246 <= med_hue <= 295:
+        raw_name = "PURPLE"
+      elif 296 <= med_hue <= 344:
+        raw_name = "PINK"
+      else:
+        raw_name = "CYAN"
 
-    # Temporal voting for alive slots
+      # Extra guard: cool-gray/silver badges under H.264 drift into 180-245 hue with weak sat/spread
+      if raw_name in ("BLUE", "CYAN") and (med_sat < 115.0 or med_spread < 48.0):
+        raw_name = "GRAY"
+
     buf = self.slot_votes.setdefault(slot_idx, deque(maxlen=self.vote_window))
     buf.append(raw_name)
     winner, count = Counter(buf).most_common(1)[0]
@@ -126,56 +196,790 @@ class BadgeColorEngine:
     return winner, self.hex_map[winner]
 
 
+class PlayerKillState:
+  """
+  Per-row temporal kill state machine:
+  - Eliminates single-frame hallucinations (never locks on a single spike)
+  - Fast confirmation for realistic +1 increments (~0.15-0.25s)
+  - Strict verification for multi-kill jumps (+2..+4 or larger)
+  - Self-healing downward correction if an initial reading was ever wrong
+  """
+  def __init__(self):
+    self.confirmed_kills: int = 0
+    self.initialized: bool = False
+    self.recent_reads: deque = deque(maxlen=11)  # (val, weight, is_ocr)
+    self.candidate_val: Optional[int] = None
+    self.candidate_streak: int = 0
+    self.candidate_ocr_confirmed: bool = False
+    self.lower_val: Optional[int] = None
+    self.lower_streak: int = 0
+    self.lower_ocr_confirmed: bool = False
+    self.last_raw: Optional[int] = None
+    self.last_conf: float = 0.0
+
+  def reset(self):
+    self.confirmed_kills = 0
+    self.initialized = False
+    self.recent_reads.clear()
+    self.candidate_val = None
+    self.candidate_streak = 0
+    self.candidate_ocr_confirmed = False
+    self.lower_val = None
+    self.lower_streak = 0
+    self.lower_ocr_confirmed = False
+    self.last_raw = None
+    self.last_conf = 0.0
+
+  def update(self, raw_val: Optional[int], conf: float, ocr_val: Optional[int] = None, ocr_conf: float = 0.0) -> int:
+    if raw_val is None and ocr_val is None:
+      return self.confirmed_kills
+
+    fused_val = raw_val
+    fused_conf = conf
+    ocr_agrees = False
+
+    if ocr_val is not None and ocr_conf >= 0.72:
+      if raw_val is None:
+        fused_val = ocr_val
+        fused_conf = ocr_conf
+        ocr_agrees = True
+      elif ocr_val == raw_val:
+        fused_val = raw_val
+        fused_conf = min(1.0, max(conf, ocr_conf) + 0.15)
+        ocr_agrees = True
+      else:
+        if ocr_conf >= 0.90 and conf < 0.80:
+          fused_val = ocr_val
+          fused_conf = ocr_conf
+          ocr_agrees = True
+        elif conf >= 0.88 and ocr_conf < 0.82:
+          fused_val = raw_val
+          fused_conf = conf
+        else:
+          return self.confirmed_kills
+
+    if fused_val is None or fused_val < 0 or fused_val > 45:
+      return self.confirmed_kills
+
+    self.last_raw = fused_val
+    self.last_conf = fused_conf
+    weight = 2.0 if ocr_agrees else max(0.5, fused_conf)
+    self.recent_reads.append((fused_val, weight, ocr_agrees))
+
+    if not self.initialized:
+      scores: Dict[int, float] = {}
+      counts: Dict[int, int] = {}
+      has_ocr: Dict[int, bool] = {}
+      for v, w, is_o in self.recent_reads:
+        scores[v] = scores.get(v, 0.0) + w
+        counts[v] = counts.get(v, 0) + 1
+        if is_o:
+          has_ocr[v] = True
+      best_v = max(scores, key=scores.get)
+      if counts[best_v] >= 3 or (counts[best_v] >= 2 and has_ocr.get(best_v, False)):
+        self.confirmed_kills = best_v
+        self.initialized = True
+        self.candidate_val = None
+        self.candidate_streak = 0
+        self.lower_val = None
+        self.lower_streak = 0
+        return self.confirmed_kills
+      if counts[best_v] >= 2 or fused_conf >= 0.82:
+        return best_v
+      return self.confirmed_kills
+
+    if fused_val == self.confirmed_kills:
+      self.candidate_val = None
+      self.candidate_streak = 0
+      self.candidate_ocr_confirmed = False
+      self.lower_val = None
+      self.lower_streak = 0
+      self.lower_ocr_confirmed = False
+      return self.confirmed_kills
+
+    if fused_val > self.confirmed_kills:
+      self.lower_val = None
+      self.lower_streak = 0
+      self.lower_ocr_confirmed = False
+
+      delta = fused_val - self.confirmed_kills
+      if self.candidate_val == fused_val:
+        self.candidate_streak += 1
+        if ocr_agrees:
+          self.candidate_ocr_confirmed = True
+      else:
+        self.candidate_val = fused_val
+        self.candidate_streak = 1
+        self.candidate_ocr_confirmed = ocr_agrees
+
+      if delta == 1:
+        needed = 2 if self.candidate_ocr_confirmed else 3
+      elif delta <= 3:
+        needed = 3 if self.candidate_ocr_confirmed else 5
+      else:
+        needed = 5 if self.candidate_ocr_confirmed else 10
+
+      if self.candidate_streak >= needed:
+        self.confirmed_kills = fused_val
+        self.candidate_val = None
+        self.candidate_streak = 0
+        self.candidate_ocr_confirmed = False
+      return self.confirmed_kills
+
+    if fused_val < self.confirmed_kills:
+      self.candidate_val = None
+      self.candidate_streak = 0
+      self.candidate_ocr_confirmed = False
+
+      if self.lower_val == fused_val:
+        self.lower_streak += 1
+        if ocr_agrees:
+          self.lower_ocr_confirmed = True
+      else:
+        self.lower_val = fused_val
+        self.lower_streak = 1
+        self.lower_ocr_confirmed = ocr_agrees
+
+      needed_down = 8 if self.lower_ocr_confirmed else 16
+      if self.lower_streak >= needed_down:
+        self.confirmed_kills = fused_val
+        self.lower_val = None
+        self.lower_streak = 0
+        self.lower_ocr_confirmed = False
+
+    return self.confirmed_kills
+
+
+class KillCountEngine:
+  """
+  Bulletproof Free Fire Scoreboard Kill Recognition Engine:
+  1. Per-row dimming-invariant segmentation (works on bright alive AND dimmed dead rows).
+  2. Padded vertical extraction + strict centroid ownership (zero digit clipping).
+  3. High-chroma icon rejection (ignores orange spectator eye & left edge artifacts).
+  4. Aspect-preserving Normalized Cross-Correlation against multi-style condensed templates
+     + topological hole geometry + 6-zone ink profile (eliminates 4->0 and 3->8/9 confusions).
+  5. Optional RapidOCR recognition-only verification on clean padded black-on-white crops.
+  6. Per-row anti-poisoning temporal state machine with scoreboard-occlusion guard.
+  """
+
+  CANVAS_W = 28
+  CANVAS_H = 36
+
+  OCR_CHAR_MAP = {
+    'O': '0', 'o': '0', 'D': '0', 'Q': '0',
+    'I': '1', 'l': '1', 'i': '1', '|': '1', '!': '1', ']': '1', '[': '1',
+    'Z': '2', 'z': '2',
+    'S': '5', 's': '5',
+    'G': '6', 'b': '6',
+    'T': '7',
+    'B': '8',
+    'g': '9', 'q': '9',
+  }
+
+  def __init__(self, num_rows: int = 12, ocr_engine: Optional[Any] = None, template_dirs: Optional[List[str]] = None):
+    self.num_rows = num_rows
+    self.ocr = ocr_engine
+    self.states: Dict[int, PlayerKillState] = {i: PlayerKillState() for i in range(num_rows)}
+    self.template_bank: Dict[int, List[np.ndarray]] = {d: [] for d in range(10)}
+    self.rr_cursor: int = 0
+    self.frame_counter: int = 0
+    self._build_template_bank(template_dirs or [])
+
+  def reset(self):
+    for st in self.states.values():
+      st.reset()
+    self.rr_cursor = 0
+    self.frame_counter = 0
+
+  @classmethod
+  def _normalize_to_canvas(cls, mask_u8: np.ndarray) -> np.ndarray:
+    h, w = mask_u8.shape[:2]
+    if h == 0 or w == 0:
+      return np.zeros((cls.CANVAS_H, cls.CANVAS_W), dtype=np.float32)
+
+    target_h = cls.CANVAS_H - 4
+    target_w = cls.CANVAS_W - 4
+    scale = min(target_h / float(h), target_w / float(w))
+    new_w = max(2, min(target_w, int(round(w * scale))))
+    new_h = max(4, min(target_h, int(round(h * scale))))
+
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    resized = cv2.resize(mask_u8, (new_w, new_h), interpolation=interp)
+
+    canvas = np.zeros((cls.CANVAS_H, cls.CANVAS_W), dtype=np.float32)
+    x0 = (cls.CANVAS_W - new_w) // 2
+    y0 = (cls.CANVAS_H - new_h) // 2
+    canvas[y0:y0 + new_h, x0:x0 + new_w] = resized.astype(np.float32) / 255.0
+    canvas = cv2.GaussianBlur(canvas, (3, 3), 0.7)
+    return canvas
+
+  def _draw_condensed_vector_digit(self, digit: int, variant: int = 0) -> np.ndarray:
+    img = np.zeros((72, 48), dtype=np.uint8)
+    t = 7 if variant == 0 else 6
+
+    if digit == 0:
+      cv2.ellipse(img, (24, 18), (13, 11), 0, 180, 360, 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 54), (13, 11), 0, 0, 180, 255, t, cv2.LINE_AA)
+      cv2.line(img, (11, 18), (11, 54), 255, t, cv2.LINE_AA)
+      cv2.line(img, (37, 18), (37, 54), 255, t, cv2.LINE_AA)
+    elif digit == 1:
+      cv2.line(img, (26, 8), (26, 64), 255, t, cv2.LINE_AA)
+      if variant == 0:
+        cv2.line(img, (17, 17), (26, 8), 255, t - 1, cv2.LINE_AA)
+      else:
+        cv2.line(img, (16, 15), (26, 9), 255, t - 1, cv2.LINE_AA)
+        cv2.line(img, (16, 64), (35, 64), 255, t - 1, cv2.LINE_AA)
+    elif digit == 2:
+      cv2.ellipse(img, (24, 20), (13, 12), 0, 195, 360, 255, t, cv2.LINE_AA)
+      cv2.line(img, (37, 20), (37, 25), 255, t, cv2.LINE_AA)
+      cv2.line(img, (37, 25), (11, 62), 255, t, cv2.LINE_AA)
+      cv2.line(img, (11, 63), (38, 63), 255, t, cv2.LINE_AA)
+    elif digit == 3:
+      cv2.ellipse(img, (23, 19), (13, 11), 0, 200, 360, 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (23, 25), (13, 10), 0, 0, 90, 255, t, cv2.LINE_AA)
+      cv2.line(img, (19, 35), (27, 35), 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (23, 47), (14, 11), 0, 270, 360, 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (23, 53), (14, 11), 0, 0, 165, 255, t, cv2.LINE_AA)
+    elif digit == 4:
+      if variant == 0:
+        cv2.line(img, (32, 8), (32, 64), 255, t, cv2.LINE_AA)
+        cv2.line(img, (31, 9), (9, 46), 255, t, cv2.LINE_AA)
+        cv2.line(img, (9, 46), (39, 46), 255, t, cv2.LINE_AA)
+      else:
+        cv2.line(img, (12, 8), (12, 45), 255, t, cv2.LINE_AA)
+        cv2.line(img, (12, 45), (38, 45), 255, t, cv2.LINE_AA)
+        cv2.line(img, (32, 8), (32, 64), 255, t, cv2.LINE_AA)
+    elif digit == 5:
+      cv2.line(img, (12, 9), (37, 9), 255, t, cv2.LINE_AA)
+      cv2.line(img, (12, 9), (12, 34), 255, t, cv2.LINE_AA)
+      cv2.line(img, (12, 34), (27, 34), 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 49), (13, 15), 0, 270, 360, 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 51), (13, 13), 0, 0, 165, 255, t, cv2.LINE_AA)
+    elif digit == 6:
+      cv2.ellipse(img, (24, 20), (13, 12), 0, 180, 340, 255, t, cv2.LINE_AA)
+      cv2.line(img, (11, 20), (11, 52), 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 48), (13, 15), 0, 0, 360, 255, t, cv2.LINE_AA)
+    elif digit == 7:
+      cv2.line(img, (10, 9), (38, 9), 255, t, cv2.LINE_AA)
+      cv2.line(img, (37, 10), (18, 64), 255, t, cv2.LINE_AA)
+    elif digit == 8:
+      cv2.ellipse(img, (24, 21), (12, 13), 0, 0, 360, 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 49), (13, 15), 0, 0, 360, 255, t, cv2.LINE_AA)
+    elif digit == 9:
+      cv2.ellipse(img, (24, 24), (13, 15), 0, 0, 360, 255, t, cv2.LINE_AA)
+      cv2.line(img, (37, 24), (37, 52), 255, t, cv2.LINE_AA)
+      cv2.ellipse(img, (24, 52), (13, 12), 0, 0, 165, 255, t, cv2.LINE_AA)
+
+    ys, xs = np.where(img > 40)
+    if len(xs) == 0 or len(ys) == 0:
+      return np.zeros((self.CANVAS_H, self.CANVAS_W), dtype=np.float32)
+    crop = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    return self._normalize_to_canvas(crop)
+
+  def _render_opencv_font_digit(self, digit: int, font_face: int, thickness: int, condense_x: float = 0.72) -> np.ndarray:
+    canvas = np.zeros((90, 90), dtype=np.uint8)
+    cv2.putText(canvas, str(digit), (18, 68), font_face, 2.0, 255, thickness, cv2.LINE_AA)
+    ys, xs = np.where(canvas > 40)
+    if len(xs) == 0 or len(ys) == 0:
+      return np.zeros((self.CANVAS_H, self.CANVAS_W), dtype=np.float32)
+    crop = canvas[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    if condense_x < 0.99 and digit != 1:
+      ch, cw = crop.shape[:2]
+      new_cw = max(3, int(round(cw * condense_x)))
+      crop = cv2.resize(crop, (new_cw, ch), interpolation=cv2.INTER_AREA)
+    return self._normalize_to_canvas(crop)
+
+  def _build_template_bank(self, candidate_dirs: List[str]):
+    tpl_dir = None
+    for cd in candidate_dirs:
+      if os.path.isdir(cd) and os.path.exists(os.path.join(cd, 'tpl_0.png')):
+        tpl_dir = cd
+        break
+
+    for d in range(10):
+      if tpl_dir is not None:
+        p = os.path.join(tpl_dir, f'tpl_{d}.png')
+        if os.path.exists(p):
+          img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+          if img is not None and img.size > 0:
+            ys, xs = np.where(img > 90)
+            if len(xs) > 0 and len(ys) > 0:
+              crop = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+              self.template_bank[d].append(self._normalize_to_canvas(crop))
+
+      self.template_bank[d].append(self._draw_condensed_vector_digit(d, variant=0))
+      if d in (1, 4):
+        self.template_bank[d].append(self._draw_condensed_vector_digit(d, variant=1))
+
+      self.template_bank[d].append(self._render_opencv_font_digit(d, cv2.FONT_HERSHEY_SIMPLEX, 4, condense_x=0.72))
+      self.template_bank[d].append(self._render_opencv_font_digit(d, cv2.FONT_HERSHEY_DUPLEX, 3, condense_x=0.74))
+
+  def _structural_adjustments(self, bin_patch: np.ndarray, orig_w: int, orig_h: int) -> Dict[int, float]:
+    adj = {d: 0.0 for d in range(10)}
+    h, w = bin_patch.shape[:2]
+    aspect = orig_w / float(max(1, orig_h))
+
+    padded = cv2.copyMakeBorder(bin_patch, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
+    cnts, hier = cv2.findContours(padded, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+    holes = []
+    if hier is not None and len(cnts) > 1:
+      patch_area = float(max(1, h * w))
+      for idx in range(len(cnts)):
+        if hier[0][idx][3] != -1:
+          area = cv2.contourArea(cnts[idx])
+          hx, hy, hw, hh = cv2.boundingRect(cnts[idx])
+          if area >= max(6.0, 0.018 * patch_area) and hh >= max(3, int(0.10 * h)):
+            cy_rel = ((hy - 2) + hh / 2.0) / float(max(1, h))
+            h_rel = hh / float(max(1, h))
+            holes.append((cy_rel, h_rel, area / patch_area))
+
+    num_holes = len(holes)
+
+    grid = (cv2.resize(bin_patch, (18, 24), interpolation=cv2.INTER_AREA) > 100).astype(np.float32)
+    top_left = float(np.mean(grid[0:7, 0:7]))
+    top_bar = float(np.mean(grid[0:5, 3:15]))
+    mid_left = float(np.mean(grid[7:17, 0:6]))
+    mid_right = float(np.mean(grid[7:17, 12:18]))
+    bot_left = float(np.mean(grid[17:24, 0:7]))
+    bot_bar = float(np.mean(grid[19:24, 3:15]))
+    upper_left_gap = float(np.mean(grid[5:11, 0:5]))
+    lower_left_gap = float(np.mean(grid[13:19, 0:5]))
+    upper_right_gap = float(np.mean(grid[5:11, 13:18]))
+    center_core = float(np.mean(grid[7:17, 6:12]))
+
+    if aspect <= 0.42:
+      adj[1] += 0.35
+      for d in (0, 2, 3, 4, 5, 6, 8, 9):
+        adj[d] -= 0.25
+    elif aspect >= 0.56:
+      adj[1] -= 0.30
+
+    if num_holes == 0:
+      for d in (1, 2, 3, 5, 7):
+        adj[d] += 0.10
+      adj[8] -= 0.28
+      adj[0] -= 0.22
+    elif num_holes == 1:
+      cy_rel, h_rel, _ = holes[0]
+      adj[8] -= 0.12
+      adj[1] -= 0.25
+      adj[2] -= 0.14
+      adj[3] -= 0.18
+      adj[5] -= 0.14
+      adj[7] -= 0.20
+
+      if h_rel >= 0.42 and 0.36 <= cy_rel <= 0.64:
+        if bot_left >= 0.25 and top_left >= 0.25 and center_core <= 0.18:
+          adj[0] += 0.28
+        else:
+          adj[0] -= 0.18
+
+      if cy_rel <= 0.56:
+        adj[6] -= 0.16
+        if bot_left <= 0.16 and bot_bar <= 0.28:
+          adj[4] += 0.28
+          adj[0] -= 0.32
+          adj[9] -= 0.10
+        if top_bar >= 0.45 and top_left >= 0.28:
+          adj[9] += 0.16
+          adj[4] -= 0.08
+      else:
+        adj[6] += 0.24
+        adj[9] -= 0.18
+        adj[4] -= 0.22
+        adj[0] -= 0.14
+    elif num_holes >= 2:
+      adj[8] += 0.28
+      for d in (1, 2, 3, 4, 5, 7):
+        adj[d] -= 0.22
+      adj[0] -= 0.18
+
+    if upper_left_gap <= 0.16 and lower_left_gap <= 0.16 and mid_right >= 0.38:
+      adj[3] += 0.20
+      adj[8] -= 0.22
+      adj[0] -= 0.24
+      adj[6] -= 0.20
+      adj[9] -= 0.14
+
+    if bot_left <= 0.14 and bot_bar <= 0.30:
+      adj[4] += 0.16
+      adj[0] -= 0.24
+      adj[2] -= 0.20
+      adj[3] -= 0.12
+      adj[6] -= 0.22
+      adj[8] -= 0.22
+
+    if top_bar >= 0.48 and mid_left <= 0.14 and bot_bar <= 0.28 and num_holes == 0:
+      adj[7] += 0.18
+      adj[2] -= 0.14
+      adj[3] -= 0.10
+
+    if upper_right_gap <= 0.16 and bot_bar >= 0.35:
+      adj[6] += 0.12
+      adj[8] -= 0.10
+      adj[0] -= 0.12
+
+    return adj
+
+  def classify_digit_patch(self, gray_patch: np.ndarray, bin_patch: np.ndarray, orig_w: int, orig_h: int) -> Tuple[int, float]:
+    if bin_patch is None or bin_patch.size == 0:
+      return 0, 0.0
+
+    canvas_bin = self._normalize_to_canvas(bin_patch)
+    if float(np.std(canvas_bin)) < 1e-4:
+      return 0, 0.0
+
+    g_min, g_max = float(gray_patch.min()), float(gray_patch.max())
+    if g_max - g_min > 10.0:
+      soft_u8 = np.clip((gray_patch.astype(np.float32) - g_min) * (255.0 / (g_max - g_min)), 0, 255).astype(np.uint8)
+      canvas_soft = self._normalize_to_canvas(soft_u8)
+      use_soft = float(np.std(canvas_soft)) >= 1e-4
+    else:
+      canvas_soft = canvas_bin
+      use_soft = False
+
+    struct_adj = self._structural_adjustments(bin_patch, orig_w, orig_h)
+    best_scores: Dict[int, float] = {}
+
+    for d, tpls in self.template_bank.items():
+      max_ncc = -1.0
+      for tpl in tpls:
+        if float(np.std(tpl)) < 1e-4:
+          continue
+        res_b = cv2.matchTemplate(canvas_bin, tpl, cv2.TM_CCOEFF_NORMED)
+        val_b = float(res_b[0, 0]) if np.isfinite(res_b[0, 0]) else -1.0
+        if use_soft:
+          res_s = cv2.matchTemplate(canvas_soft, tpl, cv2.TM_CCOEFF_NORMED)
+          val_s = float(res_s[0, 0]) if np.isfinite(res_s[0, 0]) else val_b
+          val = 0.65 * val_b + 0.35 * val_s
+        else:
+          val = val_b
+        if val > max_ncc:
+          max_ncc = val
+      best_scores[d] = max_ncc + struct_adj[d]
+
+    ranked = sorted(best_scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_d, best_s = ranked[0]
+    second_s = ranked[1][1] if len(ranked) > 1 else -1.0
+
+    margin = max(0.0, best_s - second_s)
+    conf = float(np.clip(0.55 * max(0.0, best_s) + 0.90 * min(0.5, margin), 0.0, 1.0))
+    return best_d, conf
+
+  def _ocr_verify_cluster(self, clean_bin_cluster: np.ndarray) -> Tuple[Optional[int], float]:
+    if self.ocr is None or clean_bin_cluster is None or clean_bin_cluster.size == 0:
+      return None, 0.0
+
+    ch, cw = clean_bin_cluster.shape[:2]
+    if ch < 4 or cw < 2:
+      return None, 0.0
+
+    target_h = 36
+    target_w = max(8, int(round(cw * (target_h / float(ch)))))
+    fg = cv2.resize(clean_bin_cluster, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+    inv = 255 - fg
+    padded = cv2.copyMakeBorder(inv, 18, 18, 22, 22, cv2.BORDER_CONSTANT, value=255)
+    padded_bgr = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+
+    res = None
+    try:
+      res, _ = self.ocr(padded_bgr, use_det=False, use_cls=False, use_rec=True)
+    except TypeError:
+      try:
+        res, _ = self.ocr(padded_bgr)
+      except Exception:
+        return None, 0.0
+    except Exception:
+      return None, 0.0
+
+    if not res:
+      return None, 0.0
+
+    raw_txt = ""
+    score = 0.0
+    first = res[0]
+    if isinstance(first, (list, tuple)):
+      if len(first) == 2 and isinstance(first[0], str):
+        raw_txt, score = first[0], float(first[1])
+      elif len(first) >= 3 and isinstance(first[1], str):
+        raw_txt, score = first[1], float(first[2])
+
+    cleaned = ""
+    for ch_c in raw_txt.strip():
+      if ch_c.isdigit():
+        cleaned += ch_c
+      elif ch_c in self.OCR_CHAR_MAP:
+        cleaned += self.OCR_CHAR_MAP[ch_c]
+
+    if not cleaned or len(cleaned) > 2:
+      return None, 0.0
+
+    val = int(cleaned)
+    if val < 0 or val > 45:
+      return None, 0.0
+    return val, score
+
+  def _extract_row_observation(
+    self,
+    frame: np.ndarray,
+    s2_coords: Tuple[int, int, int, int],
+    row_idx: int
+  ) -> Tuple[Optional[int], float, Optional[np.ndarray]]:
+    fh, fw = frame.shape[:2]
+    sx0, sy0, sx1, sy1 = s2_coords
+    sx0 = max(0, min(fw - 1, sx0))
+    sx1 = max(sx0 + 2, min(fw, sx1))
+    sy0 = max(0, min(fh - 1, sy0))
+    sy1 = max(sy0 + self.num_rows, min(fh, sy1))
+
+    s2_h = sy1 - sy0
+    s2_w = sx1 - sx0
+    row_h = s2_h / float(self.num_rows)
+
+    own_y0 = sy0 + row_idx * row_h
+    own_y1 = sy0 + (row_idx + 1) * row_h
+
+    pad_y = max(3, int(round(row_h * 0.20)))
+    ext_y0 = max(0, int(np.floor(own_y0)) - pad_y)
+    ext_y1 = min(fh, int(np.ceil(own_y1)) + pad_y)
+
+    row_bgr = frame[ext_y0:ext_y1, sx0:sx1]
+    if row_bgr.size == 0:
+      return None, 0.0, None
+
+    scale = 3
+    up_bgr = cv2.resize(row_bgr, (s2_w * scale, (ext_y1 - ext_y0) * scale), interpolation=cv2.INTER_CUBIC)
+    up_gray = cv2.cvtColor(up_bgr, cv2.COLOR_BGR2GRAY)
+    up_hsv = cv2.cvtColor(up_bgr, cv2.COLOR_BGR2HSV)
+
+    bg_val = float(np.percentile(up_gray, 25))
+    sat = up_hsv[:, :, 1]
+    colored_icon_mask = (sat > 90)
+    clean_gray = up_gray.copy()
+    clean_gray[colored_icon_mask] = int(bg_val)
+
+    rel_own_y0 = (own_y0 - ext_y0) * scale
+    rel_own_y1 = (own_y1 - ext_y0) * scale
+    iy0 = max(0, int(round(rel_own_y0)))
+    iy1 = min(clean_gray.shape[0], int(round(rel_own_y1)))
+    core_gray = clean_gray[iy0:iy1, :]
+    if core_gray.size == 0:
+      return None, 0.0, None
+
+    local_bg = float(np.percentile(core_gray, 25))
+    local_fg = float(np.percentile(core_gray, 98.5))
+    contrast = local_fg - local_bg
+    if contrast < 20.0:
+      return None, 0.0, None
+
+    thr_val = local_bg + 0.46 * contrast
+    thr_val = max(local_bg + 15.0, min(local_fg - 10.0, thr_val))
+    bin_mask = (clean_gray >= thr_val).astype(np.uint8) * 255
+
+    cnts, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    up_row_h = row_h * scale
+    up_w = s2_w * scale
+
+    min_h = max(8.0, 0.34 * up_row_h)
+    max_h = 0.88 * up_row_h
+    min_w = max(4.0, 0.06 * up_row_h)
+    max_w = 0.78 * up_row_h
+
+    candidates = []
+    for c in cnts:
+      bx, by, bw, bh = cv2.boundingRect(c)
+      if bh < min_h or bh > max_h or bw < min_w or bw > max_w:
+        continue
+      ar = bh / float(max(1, bw))
+      if ar < 0.95 or ar > 6.5:
+        continue
+      cy = by + bh * 0.5
+      if cy < rel_own_y0 or cy >= rel_own_y1:
+        continue
+      if (bx <= 1 or (bx + bw) >= up_w - 1) and bw < 0.18 * up_row_h:
+        continue
+      fill = cv2.contourArea(c) / float(max(1, bw * bh))
+      if fill < 0.14:
+        continue
+      candidates.append((bx, by, bw, bh))
+
+    if not candidates:
+      return None, 0.0, None
+
+    candidates.sort(key=lambda b: b[0])
+
+    while len(candidates) > 1:
+      b0 = candidates[0]
+      b1 = candidates[1]
+      gap = b1[0] - (b0[0] + b0[2])
+      if gap > 0.45 * up_row_h or (up_w > 1.45 * up_row_h and b0[0] < 0.25 * up_w and gap > 0.22 * up_row_h):
+        candidates.pop(0)
+      else:
+        break
+
+    if len(candidates) > 2:
+      candidates = candidates[-2:]
+
+    if len(candidates) == 2:
+      b0, b1 = candidates[0], candidates[1]
+      gap = b1[0] - (b0[0] + b0[2])
+      h_ratio = min(b0[3], b1[3]) / float(max(b0[3], b1[3]))
+      if gap > 0.45 * up_row_h or h_ratio < 0.72:
+        center_x = up_w * 0.55
+        candidates = [min(candidates, key=lambda b: abs((b[0] + b[2] * 0.5) - center_x))]
+
+    digits = []
+    confs = []
+    for bx, by, bw, bh in candidates:
+      g_patch = clean_gray[by:by + bh, bx:bx + bw]
+      b_patch = bin_mask[by:by + bh, bx:bx + bw]
+      d, c_score = self.classify_digit_patch(g_patch, b_patch, bw, bh)
+      digits.append(d)
+      confs.append(c_score)
+
+    if not digits:
+      return None, 0.0, None
+
+    detected_val = int("".join(str(d) for d in digits))
+    min_conf = float(min(confs))
+
+    cx0 = min(b[0] for b in candidates)
+    cy0 = min(b[1] for b in candidates)
+    cx1 = max(b[0] + b[2] for b in candidates)
+    cy1 = max(b[1] + b[3] for b in candidates)
+    cluster_mask = bin_mask[cy0:cy1, cx0:cx1]
+
+    return detected_val, min_conf, cluster_mask
+
+  def process_frame(
+    self,
+    frame: np.ndarray,
+    s2_coords: Tuple[int, int, int, int]
+  ) -> List[Dict[str, Any]]:
+    self.frame_counter += 1
+    observations = []
+    valid_rows = 0
+
+    for i in range(self.num_rows):
+      raw_val, conf, cluster_mask = self._extract_row_observation(frame, s2_coords, i)
+      observations.append((raw_val, conf, cluster_mask))
+      if raw_val is not None:
+        valid_rows += 1
+
+    if valid_rows < 4:
+      return [
+        {
+          'kills': self.states[i].confirmed_kills,
+          'raw': None,
+          'conf': 0.0,
+          'locked': self.states[i].initialized
+        }
+        for i in range(self.num_rows)
+      ]
+
+    ocr_budget = 2 if self.ocr is not None else 0
+    ocr_targets = set()
+
+    if ocr_budget > 0:
+      for i in range(self.num_rows):
+        raw_val, conf, cluster_mask = observations[i]
+        if raw_val is None or cluster_mask is None:
+          continue
+        st = self.states[i]
+        needs_check = (
+          (not st.initialized and raw_val > 0) or
+          (st.initialized and raw_val != st.confirmed_kills) or
+          (conf < 0.68)
+        )
+        if needs_check:
+          ocr_targets.add(i)
+          if len(ocr_targets) >= ocr_budget:
+            break
+
+      if len(ocr_targets) < ocr_budget:
+        for _ in range(self.num_rows):
+          idx = self.rr_cursor % self.num_rows
+          self.rr_cursor += 1
+          if idx not in ocr_targets and observations[idx][2] is not None:
+            ocr_targets.add(idx)
+            if len(ocr_targets) >= ocr_budget:
+              break
+
+    results = []
+    for i in range(self.num_rows):
+      raw_val, conf, cluster_mask = observations[i]
+      ocr_val, ocr_conf = None, 0.0
+      if i in ocr_targets and cluster_mask is not None:
+        ocr_val, ocr_conf = self._ocr_verify_cluster(cluster_mask)
+
+      confirmed = self.states[i].update(raw_val, conf, ocr_val=ocr_val, ocr_conf=ocr_conf)
+      results.append({
+        'kills': confirmed,
+        'raw': raw_val,
+        'conf': conf,
+        'locked': self.states[i].initialized
+      })
+
+    return results
+
+
 class ThreadedScoreboardDetector:
   """
   High-Performance Asynchronous Free Fire Scoreboard AI Tracker:
-  - Multithreaded: Main thread runs video capture & OpenCV display at native 30-60 FPS (Zero Stutter).
-  - Background Worker: Runs RapidOCR on video start to register team rosters, then tracks live
-    kill numbers and alive statuses at maximum frame rate using <3ms template/color classification.
-  - Immediate Sync: Broadcasts detected teams to the Node.js backend on the very first frame,
-    then updates every 1.0-1.5s (or immediately on kill events).
+  - Lobby Registration -> Match Lock ('l' key): Scroll through all teams in the lobby
+    to register them permanently, then press 'l' to lock the roster for the match.
+  - Zero Duplicates: Canonical color keying updates existing teams in-place on return.
+  - Permanent Dead Teams: Eliminated squads stay on the leaderboard at 0 alive / 0.0 HP [DEAD].
+  - 12-Team OpenCV Leaderboard: Displays up to 12 tracked teams simultaneously on screen.
   """
   def __init__(
     self,
     server_url: str = "http://localhost:3001",
-    sync_interval: float = 1.2
+    sync_interval: float = 1.2,
+    max_display_teams: int = 12
   ):
-    # Ensure localhost bypasses system/IDE proxies
     os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
     os.environ['no_proxy'] = 'localhost,127.0.0.1'
     self.server_url = server_url.replace("localhost", "127.0.0.1")
     self.sync_interval = sync_interval
+    self.max_display_teams = max_display_teams
     self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     self.color_engine = BadgeColorEngine(vote_window=9, lock_threshold=5)
 
-    # Proxy-bypass HTTP opener for rock-solid local REST sync
     self.http_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-    # Auto-start Node.js server if not currently active
     self._ensure_server_running()
 
     self.ocr = RapidOCR() if RapidOCR is not None else None
 
-    # Slot coordinates (Loaded from slot_calibration.json if present)
     self.slot1_norm = [0.693, 0.075, 0.889, 0.968]
     self.slot2_norm = [0.879, 0.075, 0.945, 0.968]
     self._load_saved_calibration()
 
-    # Digit Templates
-    self.templates = {}
-    self._init_digit_templates()
+    base_dir = os.path.dirname(__file__)
+    tpl_dirs = [
+      os.path.join(base_dir, 'templates'),
+      os.path.join(base_dir, '..', 'templates'),
+      r"C:\Users\ASUS\OneDrive\Desktop\Esport\live_analytics_leaderboard\vision-engine\templates"
+    ]
+    self.kill_engine = KillCountEngine(num_rows=12, ocr_engine=self.ocr, template_dirs=tpl_dirs)
 
-    # Cached Rosters (player names cached once discovered so OCR doesn't block video)
     self.cached_player_names = {}
     self.cached_team_colors = {}
-    self.player_max_kills: Dict[int, int] = {}
-    self.squad_locks = {}  # Persistent squad-level color locks: squad_idx -> (color_name, hex)
+    self.squad_locks = {}
     self.has_initial_roster = False
     self.ocr_attempts = 0
 
-    # HP Tracker Pipeline (Dark-Masked Health Bar Tracker)
+    # Persistent team memory across scoreboard scrolls: canonical colorName -> team dict
+    self.persistent_teams: Dict[str, Dict[str, Any]] = {}
+    self.roster_locked: bool = False  # False = Lobby Registration, True = Match Locked
+    self.prev_slot1_small: Optional[np.ndarray] = None
+    self.scroll_settling_frames: int = 0
+    self.scroll_diff_threshold: float = 14.0
+
     self.hp_pipeline = None
     try:
+      sys.path.append(os.path.abspath(self.project_root))
       sys.path.append(os.path.abspath(os.path.join(self.project_root, '..')))
       from hp_tracker.core.hp_pipeline import HPTrackerPipeline
       self.hp_pipeline = HPTrackerPipeline()
@@ -183,7 +987,6 @@ class ThreadedScoreboardDetector:
     except Exception as e:
       print(f"[HPTracker Info] HP Pipeline not active: {e}")
 
-    # Threading & State
     self.running = True
     self.lock = threading.Lock()
     self.current_frame = None
@@ -191,13 +994,36 @@ class ThreadedScoreboardDetector:
     self.fps_display = 30.0
     self.total_synced_events = 0
     self.last_sync_time = 0.0
+    self.last_synced_total_kills = -1
 
-    # Start Background AI Worker Thread
     self.worker_thread = threading.Thread(target=self._ai_worker_loop, daemon=True)
     self.worker_thread.start()
 
+  def reset_kill_tracker(self):
+    with self.lock:
+      self.kill_engine.reset()
+      self.last_synced_total_kills = -1
+
+  def clear_persistent_teams(self):
+    """Clears all stored teams and unlocks back to Lobby Registration Mode."""
+    with self.lock:
+      self.persistent_teams.clear()
+      self.roster_locked = False
+      self.kill_engine.reset()
+      self.color_engine.reset_cache()
+      self.squad_locks.clear()
+      self.cached_player_names.clear()
+      self.last_synced_total_kills = -1
+    print("[Leaderboard] Cleared teams -> LOBBY REGISTRATION MODE.", flush=True)
+
+  def toggle_roster_lock(self):
+    """Locks registered lobby teams for the match (press 'l')."""
+    with self.lock:
+      self.roster_locked = not self.roster_locked
+      state = "MATCH LOCKED" if self.roster_locked else "LOBBY REGISTRATION"
+      print(f"[Leaderboard] Mode -> {state} ({len(self.persistent_teams)} teams registered)", flush=True)
+
   def _load_saved_calibration(self):
-    """Loads previously saved slot calibration if available"""
     calib_file = os.path.join(self.project_root, 'slot_calibration.json')
     if os.path.exists(calib_file):
       try:
@@ -206,22 +1032,20 @@ class ThreadedScoreboardDetector:
           if 'slot1' in data and 'slot2' in data:
             self.slot1_norm = data['slot1']
             self.slot2_norm = data['slot2']
-            print(f"[Calibration] Loaded saved slots from slot_calibration.json")
+            print("[Calibration] Loaded saved slots from slot_calibration.json")
       except Exception:
         pass
 
   def _save_calibration(self):
-    """Saves current slot calibration to disk"""
     calib_file = os.path.join(self.project_root, 'slot_calibration.json')
     try:
       with open(calib_file, 'w', encoding='utf-8') as f:
         json.dump({'slot1': self.slot1_norm, 'slot2': self.slot2_norm}, f, indent=2)
-      print(f"[Calibration] Saved slots to slot_calibration.json")
+      print("[Calibration] Saved slots to slot_calibration.json")
     except Exception:
       pass
 
   def _ensure_server_running(self):
-    """Checks if Node.js server on port 3001 is listening. If not, auto-spawns it."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.3)
     is_listening = False
@@ -237,7 +1061,7 @@ class ThreadedScoreboardDetector:
       server_dir = os.path.join(self.project_root, 'server')
       server_file = os.path.join(server_dir, 'server.js')
       if os.path.exists(server_file):
-        print(f"[AutoServer] Port 3001 is not active. Auto-starting Node.js server...")
+        print("[AutoServer] Port 3001 is not active. Auto-starting Node.js server...")
         try:
           subprocess.Popen(
             ['node', 'server.js'],
@@ -251,171 +1075,59 @@ class ThreadedScoreboardDetector:
         except Exception as e:
           print(f"[AutoServer Warning] Could not auto-launch server: {e}")
 
-  def _init_digit_templates(self):
-    """Loads templates for in-game font digits 0 through 9"""
-    base_dir = os.path.dirname(__file__)
-    candidate_dirs = [
-      os.path.join(base_dir, 'templates'),
-      os.path.join(base_dir, '..', 'templates'),
-      r"C:\Users\ASUS\OneDrive\Desktop\Esport\live_analytics_leaderboard\vision-engine\templates"
-    ]
-    tpl_dir = None
-    for cd in candidate_dirs:
-      if os.path.isdir(cd) and os.path.exists(os.path.join(cd, 'tpl_0.png')):
-        tpl_dir = cd
-        break
-
-    for d in range(10):
-      loaded = False
-      if tpl_dir is not None:
-        p = os.path.join(tpl_dir, f'tpl_{d}.png')
-        if os.path.exists(p):
-          img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-          if img is not None and img.size > 0:
-            if img.shape != (16, 10):
-              img = cv2.resize(img, (10, 16), interpolation=cv2.INTER_NEAREST)
-            self.templates[d] = img > 120
-            loaded = True
-      if not loaded:
-        # High-precision binary fallback for Free Fire font 10x16
-        fallback_grid = np.zeros((16, 10), dtype=bool)
-        if d == 0:
-          fallback_grid[1:15, 1:9] = True
-          fallback_grid[3:13, 3:7] = False
-        elif d == 1:
-          fallback_grid[1:15, 3:7] = True
-        elif d == 2:
-          fallback_grid[1:5, 1:9] = True
-          fallback_grid[5:11, 4:8] = True
-          fallback_grid[12:15, 1:9] = True
-        elif d == 3:
-          fallback_grid[1:4, 1:9] = True
-          fallback_grid[6:9, 3:9] = True
-          fallback_grid[12:15, 1:9] = True
-          fallback_grid[2:14, 6:9] = True
-        elif d == 4:
-          fallback_grid[1:10, 1:4] = True
-          fallback_grid[8:11, 1:9] = True
-          fallback_grid[1:15, 6:9] = True
-        elif d == 5:
-          fallback_grid[1:4, 1:9] = True
-          fallback_grid[4:8, 1:4] = True
-          fallback_grid[7:10, 1:9] = True
-          fallback_grid[9:14, 6:9] = True
-          fallback_grid[12:15, 1:8] = True
-        elif d == 6:
-          fallback_grid[1:15, 1:4] = True
-          fallback_grid[1:4, 1:9] = True
-          fallback_grid[7:15, 1:9] = True
-          fallback_grid[9:13, 3:7] = False
-        elif d == 7:
-          fallback_grid[1:4, 1:9] = True
-          fallback_grid[3:15, 5:9] = True
-        elif d == 8:
-          fallback_grid[1:15, 1:9] = True
-          fallback_grid[3:6, 3:7] = False
-          fallback_grid[9:13, 3:7] = False
-        elif d == 9:
-          fallback_grid[1:9, 1:9] = True
-          fallback_grid[3:7, 3:7] = False
-          fallback_grid[1:15, 6:9] = True
-          fallback_grid[12:15, 1:8] = True
-        self.templates[d] = fallback_grid
-
   def extract_exact_badge_color(self, badge_bgr: np.ndarray) -> Tuple[str, str]:
-    """
-    Extracts the exact Free Fire squad color from chromatic badge pixels,
-    rejecting dark borders, shadows, and white text.
-    """
     if badge_bgr is None or badge_bgr.size == 0:
       return "UNKNOWN", "#888888"
 
-    hsv = cv2.cvtColor(badge_bgr, cv2.COLOR_BGR2HSV)
+    inner = self.color_engine._crop_badge_interior(badge_bgr)
+    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
     sat = hsv[:, :, 1]
     val = hsv[:, :, 2]
 
-    # Filter for vibrant chromatic pixels (rejects dark backgrounds & white numbers)
-    chroma_mask = (sat > 65) & (val > 65)
-    if np.count_nonzero(chroma_mask) < 6:
-      # If not enough saturated pixels, check if eliminated or gray
-      return "GRAY", "#555555"
+    b_ch = inner[:, :, 0].astype(np.int16)
+    g_ch = inner[:, :, 1].astype(np.int16)
+    r_ch = inner[:, :, 2].astype(np.int16)
+    spread = np.maximum(np.maximum(b_ch, g_ch), r_ch) - np.minimum(np.minimum(b_ch, g_ch), r_ch)
+
+    total_px = max(1, inner.shape[0] * inner.shape[1])
+    chroma_mask = (sat >= 105) & (val >= 65) & (spread >= 42)
+    fg_count = int(np.count_nonzero(chroma_mask))
+    if fg_count < 10 or (fg_count / float(total_px)) < 0.16:
+      return "GRAY", "#9EA7B0"
 
     hues = hsv[:, :, 0][chroma_mask].astype(int) * 2
     med_hue = int(np.median(hues))
-    # Exact Free Fire esports palette
-    if med_hue >= 345 or med_hue <= 15:
+    med_sat = float(np.median(sat[chroma_mask]))
+    med_val = float(np.median(val[chroma_mask]))
+    med_spread = float(np.median(spread[chroma_mask]))
+
+    if med_hue >= 345 or med_hue <= 18:
       return "RED", "#FF2A2A"
-    elif 16 <= med_hue <= 44:
+    elif 19 <= med_hue <= 50 and med_val < 175:
+      return "BROWN", self.color_engine.hex_map.get("BROWN", "#8A631A")
+    elif 19 <= med_hue <= 42:
       return "ORANGE", "#FF7F00"
-    elif 45 <= med_hue <= 74:
+    elif 43 <= med_hue <= 70:
       return "YELLOW", "#FFD700"
-    elif 75 <= med_hue <= 165:
-      return "GREEN", "#00FF7F"
-    elif 166 <= med_hue <= 255:
-      return "BLUE", "#00D2FF"
-    elif 256 <= med_hue <= 304:
+    elif 71 <= med_hue <= 149:
+      return "GREEN", "#00D860"
+    elif 150 <= med_hue <= 168:
+      return "MINT GREEN", self.color_engine.hex_map.get("MINT GREEN", "#5ED4AA")
+    elif 169 <= med_hue <= 245:
+      if med_sat < 115.0 or med_spread < 48.0:
+        return "GRAY", "#9EA7B0"
+      return ("CYAN", "#00E5FF") if med_hue <= 200 else ("BLUE", "#1E4BFF")
+    elif 246 <= med_hue <= 295:
       return "PURPLE", "#8A2BE2"
-    elif 305 <= med_hue <= 344:
-      return "PINK", "#FF1493"
-      
-    return "CYAN", "#00E5FF"
+    elif 296 <= med_hue <= 344:
+      return "PINK", "#FF2E93"
+
+    return "GRAY", "#9EA7B0"
 
   def stop(self):
-    """Gracefully stops background worker loop"""
     self.running = False
 
-  def classify_digit(self, digit_crop: np.ndarray) -> int:
-    """
-    Classifies a cropped in-game kill digit with zero false positives.
-    Combines authentic Free Fire font template IoU matching with
-    topological hole verification and structural stroke analysis.
-    """
-    if digit_crop is None or digit_crop.size == 0:
-      return 0
-    h, w = digit_crop.shape[:2]
-    # Free Fire font digits are 3-22px wide and 8-30px high
-    if h < 8 or w < 3 or h > 35 or w > 26:
-      return 0
-
-    bin_crop = (digit_crop > 100).astype(np.uint8)
-
-    # 1. Closed-loop hole check for Digit 0 (large central cavity)
-    cnts, hier = cv2.findContours(bin_crop.copy() * 255, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hier is not None and len(cnts) > 1:
-      for idx in range(len(cnts)):
-        if hier[0][idx][3] != -1:  # hole detected
-          hx, hy, hw, hh = cv2.boundingRect(cnts[idx])
-          if hh >= 7 and cv2.contourArea(cnts[idx]) >= 10:
-            return 0
-
-    # 2. Structural verification for Digit 1: very narrow vertical stroke
-    if w <= 6 and (h / float(w) >= 2.2):
-      return 1
-
-    # Resize to canonical 10x16 for template comparison
-    resized = cv2.resize(bin_crop, (10, 16), interpolation=cv2.INTER_NEAREST) > 0
-
-    # 3. Authentic in-game font template IoU matching
-    if hasattr(self, 'templates') and self.templates:
-      scores = {}
-      for d, tpl in self.templates.items():
-        inter = np.logical_and(resized, tpl).sum()
-        union = np.logical_or(resized, tpl).sum()
-        scores[d] = inter / float(max(1, union))
-
-      best_d = max(scores, key=scores.get)
-      return best_d
-
-    # Structural fallbacks
-    if (w <= 6 or (h / float(w) >= 2.0)) and w >= 4:
-      return 1
-    bot_slice = digit_crop[max(0, h - 3):, :]
-    if float(np.mean(bot_slice > 0)) >= 0.55:
-      return 2
-    return 0
-
   def get_slot_pixels(self, frame: np.ndarray) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]:
-    """Converts normalized slot ratios to absolute pixel coordinates"""
     h, w = frame.shape[:2]
     s1 = (
       int(self.slot1_norm[0] * w),
@@ -432,7 +1144,6 @@ class ThreadedScoreboardDetector:
     return s1, s2
 
   def interactive_calibrate_slots(self, frame: np.ndarray):
-    """Allows user to click & drag Slot 1 (Teams) and Slot 2 (Kills) on screen"""
     h, w = frame.shape[:2]
     print("\n[Calibration] Select SLOT 1: Teams & Player Names area, then press ENTER or SPACE...")
     roi1 = cv2.selectROI("Select Slot 1: Teams Area", frame, fromCenter=False, showCrosshair=True)
@@ -446,9 +1157,13 @@ class ThreadedScoreboardDetector:
         (roi1[1] + roi1[3]) / float(h)
       ]
       self.has_initial_roster = False
+      self.ocr_attempts = 0
+      self.cached_player_names.clear()
       self.color_engine.reset_cache()
       self.squad_locks.clear()
-      self.player_max_kills.clear()
+      self.prev_slot1_small = None
+      self.reset_kill_tracker()
+
     print("\n[Calibration] Select SLOT 2: Kills column area, then press ENTER or SPACE...")
     roi2 = cv2.selectROI("Select Slot 2: Kills Area", frame, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow("Select Slot 2: Kills Area")
@@ -460,10 +1175,39 @@ class ThreadedScoreboardDetector:
         (roi2[0] + roi2[2]) / float(w),
         (roi2[1] + roi2[3]) / float(h)
       ]
+      self.reset_kill_tracker()
       self._save_calibration()
 
+  def _detect_scoreboard_scroll(self, slot1_bgr: np.ndarray) -> bool:
+    """
+    Detects when the spectator scrolls the scoreboard list up or down.
+    On scroll, resets row-level kill & color caches so old rows don't bleed into new teams,
+    while keeping `self.persistent_teams` completely intact.
+    """
+    gray = cv2.cvtColor(slot1_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (32, 120), interpolation=cv2.INTER_AREA)
+
+    if self.prev_slot1_small is None:
+      self.prev_slot1_small = small
+      return False
+
+    mean_diff = float(np.mean(cv2.absdiff(small, self.prev_slot1_small)))
+    self.prev_slot1_small = small
+
+    if mean_diff >= self.scroll_diff_threshold:
+      # Scroll motion detected: reset row-indexed state and wait 6 ticks to settle cleanly
+      self.scroll_settling_frames = 6
+      self.kill_engine.reset()
+      self.color_engine.reset_cache()
+      self.squad_locks.clear()
+      self.cached_player_names.clear()
+      self.has_initial_roster = False
+      self.ocr_attempts = 0
+      return True
+
+    return False
+
   def _ai_worker_loop(self):
-    """Background thread that runs detection and syncs to backend without blocking video display"""
     while self.running:
       try:
         frame = None
@@ -484,15 +1228,18 @@ class ThreadedScoreboardDetector:
           time.sleep(0.05)
           continue
 
+        # Scroll Guard: detect scoreboard scroll and allow rows to settle cleanly
+        is_moving = self._detect_scoreboard_scroll(slot1)
+        if is_moving:
+          time.sleep(0.05)
+          continue
+
         s1_h, s1_w = slot1.shape[:2]
-        s2_h, s2_w = slot2.shape[:2]
-        # Free Fire Esports Tournament Structure: Exactly 4 players per squad, 3 squads visible
         squad_size = 4
         num_squads = 3
         num_rows = num_squads * squad_size  # 12 rows
         row_height = s1_h / float(num_rows)
 
-        # Initial Roster Discovery via OCR (runs once on start or if names not discovered)
         ocr_results = []
         if (not self.has_initial_roster or len(self.cached_player_names) < 4) and self.ocr is not None and self.ocr_attempts < 2 and s1_w >= 80:
           self.ocr_attempts += 1
@@ -503,11 +1250,9 @@ class ThreadedScoreboardDetector:
           except Exception:
             pass
 
-        # Binary mask of Slot 2 for digit matching (High-contrast thresholding rejecting HUD noise)
-        s2_gray = cv2.cvtColor(slot2, cv2.COLOR_BGR2GRAY)
-        _, s2_thresh = cv2.threshold(s2_gray, 130, 255, cv2.THRESH_BINARY)
+        kill_outputs = self.kill_engine.process_frame(frame, s2_coords)
 
-        # Pass 1: Extract row-level features (alive status, badge patch, player name, kills)
+        # Pass 1: Extract row-level features
         raw_players = []
         bg_lab = self.color_engine.estimate_hud_background_lab(slot1)
         for i in range(num_rows):
@@ -517,8 +1262,6 @@ class ThreadedScoreboardDetector:
             break
           y_center = (y_start + y_end) / 2.0
 
-          # Check Alive status: in Free Fire, eliminated rows are dimmed/grayed out
-          # Name area text is bright white for alive players and dimmed dark gray for eliminated players
           name_zone = frame[
             s1_coords[1] + y_start : s1_coords[1] + y_end,
             s1_coords[2] + 4 : min(frame.shape[1], s1_coords[2] + int(0.18 * frame.shape[1]))
@@ -529,10 +1272,8 @@ class ThreadedScoreboardDetector:
           else:
             is_alive = True
 
-          # Extract badge crop directly from slot1 (the calibrated badge column)
-          badge_crop = slot1[y_start + 2: y_end - 2, :]
+          badge_crop = slot1[y_start + 2: max(y_start + 3, y_end - 2), :]
 
-          # Player Name (use cached name or OCR match)
           player_name = self.cached_player_names.get(i)
           if not player_name or player_name.startswith("Player_"):
             for r in (ocr_results or []):
@@ -547,34 +1288,8 @@ class ThreadedScoreboardDetector:
           if not player_name:
             player_name = f"Player_{i+1}"
 
-          # Kill Count Detection from Slot 2 (Kills Column)
-          digit_zone = s2_thresh[y_start:y_end, :]
-
-          detected_kills = 0
-          if digit_zone.size > 0:
-            cnts, _ = cv2.findContours(digit_zone.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            digit_cnts = [
-              c for c in cnts 
-              if cv2.boundingRect(c)[3] >= 8 and cv2.boundingRect(c)[2] >= 3
-              and cv2.boundingRect(c)[3] <= 28 and cv2.boundingRect(c)[2] <= 22
-            ]
-            digit_cnts.sort(key=lambda c: cv2.boundingRect(c)[0])
-            boxes = [cv2.boundingRect(c) for c in digit_cnts]
-            # Filter skull icon if slot2 was calibrated wide (skull is at x < 12 and bw >= 10)
-            if len(boxes) > 1 and digit_zone.shape[1] > 32 and boxes[0][0] < 12 and boxes[0][2] >= 10:
-              boxes.pop(0)
-            digits = []
-            for bx, by, bw, bh in boxes:
-              patch = digit_zone[by:by+bh, bx:bx+bw]
-              d = self.classify_digit(patch)
-              digits.append(d)
-            if digits:
-              detected_kills = int("".join(str(d) for d in digits))
-
-          # Kills must be monotonically non-decreasing per player (kills never drop to 0 on death)
-          if detected_kills > 0 or i not in self.player_max_kills:
-            self.player_max_kills[i] = max(self.player_max_kills.get(i, 0), detected_kills)
-          kills = self.player_max_kills.get(i, 0)
+          k_info = kill_outputs[i] if i < len(kill_outputs) else {'kills': 0, 'locked': False, 'conf': 0.0}
+          kills = int(k_info['kills'])
 
           raw_players.append({
             'slot': i + 1,
@@ -584,13 +1299,13 @@ class ThreadedScoreboardDetector:
             'name': player_name,
             'alive': is_alive,
             'kills': kills,
+            'kill_locked': bool(k_info.get('locked', False)),
             'y_center': y_center,
             'y_range': (y_start, y_end)
           })
 
-        # Pass 2: Squad-Level Color Consensus (Alive Priority & Dimming Invariance)
-        parsed_players = []
-        ranked_teams = []
+        # Pass 2: Squad-Level Color Consensus
+        squad_drafts = []
         for sq_idx in range(num_squads):
           squad_rows = [p for p in raw_players if p['squad_idx'] == sq_idx]
           if not squad_rows:
@@ -599,43 +1314,71 @@ class ThreadedScoreboardDetector:
           alive_rows = [p for p in squad_rows if p['alive']]
           sq_color = "UNKNOWN"
           sq_hex = "#888888"
+          sq_chroma = 0.0
 
-          # Alive-first extraction: sample un-dimmed alive players
           if alive_rows:
             votes = []
+            chroma_vals = []
             for r in alive_rows:
               c_name, c_hex = self.color_engine.extract_row_color(
                 r['badge_crop'], bg_lab, slot_idx=(sq_idx * 4) + r['slot_in_squad'], is_alive=True
               )
-              if c_name not in ["UNKNOWN", "GRAY", "DIMMED"]:
+              v_ratio, m_sat, m_spread = self.color_engine.measure_badge_chroma(r['badge_crop'])
+              chroma_vals.append(v_ratio * m_sat)
+              if c_name not in ("UNKNOWN", "DIMMED"):
                 votes.append((c_name, c_hex))
+            if chroma_vals:
+              sq_chroma = float(np.median(chroma_vals))
             if votes:
               winner_name, _ = Counter([v[0] for v in votes]).most_common(1)[0]
               sq_color = winner_name
-              sq_hex = self.color_engine.hex_map.get(winner_name, "#00E5FF")
+              sq_hex = self.color_engine.hex_map.get(winner_name, "#9EA7B0")
               self.squad_locks[sq_idx] = (sq_color, sq_hex)
 
-          # If all 4 are dead or no alive vote won:
-          if sq_color in ["UNKNOWN", "GRAY", "DIMMED"]:
+          if sq_color in ("UNKNOWN", "DIMMED"):
             if sq_idx in self.squad_locks:
-              # Dimming Invariance: maintain locked color from earlier in the match!
               sq_color, sq_hex = self.squad_locks[sq_idx]
             else:
-              # Fallback to dimmed badges
-              dim_votes = []
-              for r in squad_rows:
-                c_name, c_hex = self.color_engine.extract_row_color(
-                  r['badge_crop'], bg_lab, slot_idx=(sq_idx * 4) + r['slot_in_squad'], is_alive=False
-                )
-                if c_name not in ["UNKNOWN", "GRAY", "DIMMED"]:
-                  dim_votes.append((c_name, c_hex))
-              if dim_votes:
-                winner_name, _ = Counter([v[0] for v in dim_votes]).most_common(1)[0]
-                sq_color = winner_name
-                sq_hex = self.color_engine.hex_map.get(winner_name, "#555555")
+              sq_color = "GRAY"
+              sq_hex = self.color_engine.hex_map["GRAY"]
 
-          # Assign member colors: alive players receive the vibrant squad color;
-          # dead players are strictly marked DEAD with dimmed gray (#555555) - ZERO OG squad color!
+          squad_drafts.append({
+            'sq_idx': sq_idx,
+            'rows': squad_rows,
+            'color': sq_color,
+            'hex': sq_hex,
+            'chroma': sq_chroma,
+          })
+
+        # Pass 2B: Anti-Merge Duplicate Color Resolution across visible squads
+        color_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for d in squad_drafts:
+          color_groups.setdefault(d['color'], []).append(d)
+
+        used_colors = set(d['color'] for d in squad_drafts)
+        for col_name, group in color_groups.items():
+          if len(group) <= 1:
+            continue
+          group.sort(key=lambda g: g['chroma'], reverse=True)
+          for loser in group[1:]:
+            if "GRAY" not in used_colors and loser['chroma'] < 45.0:
+              loser['color'] = "GRAY"
+              loser['hex'] = self.color_engine.hex_map["GRAY"]
+              used_colors.add("GRAY")
+              self.squad_locks[loser['sq_idx']] = ("GRAY", loser['hex'])
+            else:
+              # Do NOT create "TEAM COLOR #2" duplicates in persistent memory
+              loser['skip_persist'] = True
+
+        # Pass 3: Build currently visible player & team structures
+        parsed_players = []
+        visible_teams: Dict[str, Dict[str, Any]] = {}
+        for d in squad_drafts:
+          squad_rows = d['rows']
+          sq_color = d['color']
+          sq_hex = d['hex']
+          team_display = f"TEAM {sq_color}"
+
           for p in squad_rows:
             if p['alive']:
               p['color'] = sq_color
@@ -647,15 +1390,23 @@ class ThreadedScoreboardDetector:
             p['squadHex'] = sq_hex
             parsed_players.append(p)
 
+          # Skip transient duplicate-color collisions so they never pollute persistent_teams
+          if d.get('skip_persist') or sq_color in ("UNKNOWN", "DIMMED"):
+            continue
+
           sq_kills = sum(p['kills'] for p in squad_rows)
           sq_alive = sum(1 for p in squad_rows if p['alive'])
-          ranked_teams.append({
-            'id': f"squad-{sq_idx + 1}",
-            'name': f"TEAM {sq_color}",
+
+          # Canonical key = sq_color (guarantees 1 entry per team, updates in place on return)
+          visible_teams[sq_color] = {
+            'id': f"team-{sq_color.lower().replace(' ', '-')}",
+            'name': team_display,
             'color': sq_hex,
             'colorName': sq_color,
             'kills': sq_kills,
             'alive': sq_alive,
+            'isVisible': True,
+            'lastSeen': now,
             'players': [{
               'slot': p['slot'],
               'name': p['name'],
@@ -665,14 +1416,47 @@ class ThreadedScoreboardDetector:
               'hex': p['hex'],
               'hp': p.get('hp', 100.0 if p['alive'] else 0.0)
             } for p in squad_rows]
-          })
+          }
 
-        # Rank teams: 1st by kills DESC, 2nd by alive DESC
+        # Pass 3B: Lobby Registration & Match-Locked In-Place Updates
+        if self.scroll_settling_frames > 0:
+          self.scroll_settling_frames -= 1
+        else:
+          for t_key, t_obj in self.persistent_teams.items():
+            if t_key not in visible_teams:
+              t_obj['isVisible'] = False
+
+          for t_key, t_obj in visible_teams.items():
+            # If roster is locked for the match, ignore unregistered/phantom colors
+            if self.roster_locked and t_key not in self.persistent_teams:
+              continue
+
+            # If team is completely dead (0 alive), NEVER remove it: force all players to 0 HP & DEAD
+            if t_obj['alive'] == 0:
+              t_obj['eliminated'] = True
+              for pl in t_obj['players']:
+                pl['alive'] = False
+                pl['hp'] = 0.0
+                pl['color'] = 'DEAD'
+                pl['hex'] = '#555555'
+            else:
+              t_obj['eliminated'] = False
+
+            # Preserve previous kills if a dead/dimmed team briefly reads lower
+            if t_key in self.persistent_teams:
+              prev = self.persistent_teams[t_key]
+              if t_obj['alive'] == 0 and t_obj['kills'] < prev['kills']:
+                t_obj['kills'] = prev['kills']
+
+            # Update existing team in-place (or register new team in Lobby Mode)
+            self.persistent_teams[t_key] = t_obj
+
+        # Build unified ranked leaderboard from all persistent teams (live + scrolled-off + dead)
+        ranked_teams = [dict(t) for t in self.persistent_teams.values()]
         ranked_teams.sort(key=lambda t: (t['kills'], t['alive']), reverse=True)
         for rank_idx, t in enumerate(ranked_teams):
           t['rank'] = rank_idx + 1
 
-        # Process Dark-Masked Spectator HP Tracker Pipeline (< 1.0 ms)
         hp_result = None
         if self.hp_pipeline is not None:
           try:
@@ -692,13 +1476,14 @@ class ThreadedScoreboardDetector:
         with self.lock:
           self.latest_result = detection_result
 
-        # Periodic sync to Node.js backend (or immediate on first frame)
-        if (now - self.last_sync_time >= self.sync_interval) or (self.total_synced_events == 0 and len(ranked_teams) > 0):
+        total_k = sum(t['kills'] for t in ranked_teams)
+        kill_event_changed = (self.last_synced_total_kills != -1 and total_k != self.last_synced_total_kills)
+
+        if (now - self.last_sync_time >= self.sync_interval) or (self.total_synced_events == 0 and len(ranked_teams) > 0) or kill_event_changed:
           self.last_sync_time = now
+          self.last_synced_total_kills = total_k
           self.total_synced_events += 1
 
-          # 1. Redundant direct write to live_state.json for instant frontend consumption
-          total_k = sum(t['kills'] for t in ranked_teams)
           total_a = sum(t['alive'] for t in ranked_teams)
           live_state_obj = {
             'match': {
@@ -729,7 +1514,6 @@ class ThreadedScoreboardDetector:
             except Exception:
               pass
 
-          # 2. HTTP POST Sync with Proxy-Bypass
           try:
             payload = json.dumps({
               'matchId': 'ffws-live-match',
@@ -742,7 +1526,7 @@ class ThreadedScoreboardDetector:
               method='POST'
             )
             with self.http_opener.open(req, timeout=1.5) as resp:
-              if self.total_synced_events % 5 == 1 or self.total_synced_events <= 3:
+              if self.total_synced_events % 5 == 1 or self.total_synced_events <= 3 or kill_event_changed:
                 print(f"[VisionEngine] Synced #{self.total_synced_events}: {len(ranked_teams)} teams to backend (Kills: {total_k}, Alive: {total_a})", flush=True)
           except Exception as e:
             if self.total_synced_events % 10 == 1:
@@ -754,12 +1538,10 @@ class ThreadedScoreboardDetector:
         time.sleep(0.1)
 
   def feed_frame(self, frame: np.ndarray):
-    """Pushes a new video frame to the worker thread"""
     with self.lock:
       self.current_frame = frame
 
   def draw_visual_overlay(self, frame: np.ndarray) -> np.ndarray:
-    """Draws visual HUD overlay and bounding boxes using cached result (Runs at full 30-60 FPS)"""
     preview = frame.copy()
     h, w = preview.shape[:2]
 
@@ -773,22 +1555,19 @@ class ThreadedScoreboardDetector:
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 230, 255), 2)
       return preview
 
-    s1 = res.get('s1_coords', (0,0,0,0))
-    s2 = res.get('s2_coords', (0,0,0,0))
-    s1_w_px = max(1, s1[2] - s1[0])
+    s1 = res.get('s1_coords', (0, 0, 0, 0))
+    s2 = res.get('s2_coords', (0, 0, 0, 0))
+    s2_row_h = max(1.0, (s2[3] - s2[1]) / 12.0)
 
-    # 1. Slot 1 (Teams Area) - Vibrant Pure Green
     cv2.rectangle(preview, (s1[0], s1[1]), (s1[2], s1[3]), (0, 255, 0), 2)
     cv2.putText(preview, "SLOT 1: TEAMS & PLAYERS", (s1[0], max(20, s1[1] - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
 
-    # 2. Slot 2 (Kills Column) - Bright Yellow
     cv2.rectangle(preview, (s2[0], s2[1]), (s2[2], s2[3]), (0, 230, 255), 2)
     cv2.putText(preview, "SLOT 2: KILLS", (s2[0] - 15, max(20, s2[1] - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 230, 255), 1, cv2.LINE_AA)
 
-    # 3. Highlight rows (Aligned Dot Color Debugger: Alive = vibrant squad color; Dead = strictly dimmed dark gray)
-    for p in res.get('parsed_players', []):
+    for idx_p, p in enumerate(res.get('parsed_players', [])):
       y0, y1 = p.get('y_range', (0, 0))
       y_center = p.get('y_center', (y0 + y1) / 2.0)
       y_abs = s1[1] + int(y_center)
@@ -796,18 +1575,14 @@ class ThreadedScoreboardDetector:
       dot_x = s1[0] + 12
       if p['alive']:
         color_bgr = self.color_engine.hex_to_bgr(p.get('hex', '#00E5FF'))
-        # Vibrant solid circle for alive player with crisp white border
         cv2.circle(preview, (dot_x, y_abs), 5, color_bgr, -1)
         cv2.circle(preview, (dot_x, y_abs), 5, (255, 255, 255), 1)
-        # Subtle green row outline
         cv2.rectangle(preview, (s1[0], s1[1] + y0), (s1[2], s1[1] + y1), (0, 200, 0), 1)
         text_color = (255, 255, 255)
         status_txt = f"{p['name']} ({p['kills']}k)"
       else:
-        # Strictly DIMMED dark gray for dead player - ZERO OG squad color!
         cv2.circle(preview, (dot_x, y_abs), 5, (55, 55, 55), -1)
         cv2.circle(preview, (dot_x, y_abs), 5, (95, 95, 95), 1)
-        # Dimmed gray row outline
         cv2.rectangle(preview, (s1[0], s1[1] + y0), (s1[2], s1[1] + y1), (45, 45, 45), 1)
         text_color = (110, 110, 110)
         status_txt = f"{p['name']} ({p['kills']}k) [DEAD]"
@@ -815,7 +1590,12 @@ class ThreadedScoreboardDetector:
       cv2.putText(preview, status_txt, (s1[0] + 25, y_abs + 4),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.42, text_color, 1, cv2.LINE_AA)
 
-    # 4. Top Telemetry HUD (Restricted to left/center so it never clips table rows)
+      k_y = s2[1] + int((idx_p + 0.5) * s2_row_h) + 4
+      k_x = max(0, s2[0] - 26)
+      k_col = (0, 255, 120) if p.get('kill_locked', False) else (0, 220, 255)
+      cv2.putText(preview, f"{p['kills']}", (k_x, k_y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.44, k_col, 1, cv2.LINE_AA)
+
     hud_end_x = max(200, s1[0] - 15) if s1[0] > 200 else w
     cv2.rectangle(preview, (0, 0), (hud_end_x, 36), (15, 10, 25), -1)
     cv2.line(preview, (0, 36), (hud_end_x, 36), (70, 50, 100), 1)
@@ -830,24 +1610,40 @@ class ThreadedScoreboardDetector:
     cv2.putText(preview, hud_text, (18, 24),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 255), 1, cv2.LINE_AA)
 
-    # 5. Live Standings Sidebar
-    panel_w = 295
-    panel_h = 45 + (len(teams) * 28)
-    cv2.rectangle(preview, (15, 50), (15 + panel_w, 50 + panel_h), (20, 14, 32), -1)
-    cv2.rectangle(preview, (15, 50), (15 + panel_w, 50 + panel_h), (120, 80, 180), 1)
-    cv2.putText(preview, "LIVE LEADERBOARD (KILLS)", (25, 72),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 230, 255), 1, cv2.LINE_AA)
+    # 12-Team Persistent Leaderboard Sidebar (Lobby Registration & Match-Locked Mode)
+    display_teams = teams[:self.max_display_teams]
+    row_step = 22
+    panel_w = 365
+    panel_h = 38 + (max(1, len(display_teams)) * row_step)
+    cv2.rectangle(preview, (15, 44), (15 + panel_w, 44 + panel_h), (20, 14, 32), -1)
+    cv2.rectangle(preview, (15, 44), (15 + panel_w, 44 + panel_h), (120, 80, 180), 1)
 
-    for idx, t in enumerate(teams):
-      y_pos = 98 + (idx * 28)
+    mode_tag = "LOCKED" if self.roster_locked else "LOBBY ['l' LOCK]"
+    cv2.putText(
+      preview,
+      f"LEADERBOARD ({len(teams)} TEAMS) | {mode_tag}",
+      (25, 64),
+      cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 140) if self.roster_locked else (0, 230, 255), 1, cv2.LINE_AA
+    )
+
+    for idx, t in enumerate(display_teams):
+      y_pos = 86 + (idx * row_step)
       t_bgr = self.color_engine.hex_to_bgr(t['color'])
+      is_vis = t.get('isVisible', True)
+      is_dead = (t.get('alive', 0) == 0)
 
-      cv2.rectangle(preview, (25, y_pos - 12), (32, y_pos + 4), t_bgr, -1)
-      row_str = f"#{t['rank']} {t['name']:13s} {t['kills']} Kills ({t['alive']} alive)"
+      cv2.rectangle(preview, (25, y_pos - 10), (32, y_pos + 3), (65, 65, 65) if is_dead else t_bgr, -1)
+      if is_dead:
+        txt_col = (110, 110, 115)
+        tag = " [DEAD]"
+      else:
+        txt_col = (255, 255, 255) if is_vis else (175, 180, 195)
+        tag = "" if is_vis else " [SAVED]"
+
+      row_str = f"#{t['rank']:<2} {t['name']:15s} {t['kills']}K ({t['alive']} alive){tag}"
       cv2.putText(preview, row_str, (38, y_pos),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.40, txt_col, 1, cv2.LINE_AA)
 
-    # 6. Spectator Live HP Overlay (from Dark-Masked HP Tracker Pipeline)
     hp_res = res.get('hp_result')
     if hp_res and self.hp_pipeline is not None:
       preview = self.hp_pipeline.draw_debug_overlay(preview, hp_res, show_canvas_preview=True)
@@ -867,7 +1663,7 @@ def run_live_scoreboard(
   print(f" Source: {source} | Sync Cadence: {sync_gap}s | Backend: {server_url}", flush=True)
   print("=" * 72, flush=True)
 
-  detector = ThreadedScoreboardDetector(server_url=server_url, sync_interval=sync_gap)
+  detector = ThreadedScoreboardDetector(server_url=server_url, sync_interval=sync_gap, max_display_teams=12)
 
   is_image = False
   cap = None
@@ -893,7 +1689,6 @@ def run_live_scoreboard(
     if img_path:
       frame_cache = cv2.imread(img_path)
     if frame_cache is None:
-      # If source is default 'image' but no image found, fallback to video_4.mp4
       v4_candidates = [
         os.path.join(os.path.dirname(__file__), 'Assets', 'video_4.mp4'),
         os.path.join(os.path.dirname(__file__), '..', 'Assets', 'video_4.mp4')
@@ -909,7 +1704,7 @@ def run_live_scoreboard(
             print(f"[VideoSource] Image fallback: streaming video from {v4} (FPS: {target_fps:.1f})")
             break
       if is_image and frame_cache is None:
-        print(f"[Error] Failed to load any input image or fallback video.")
+        print("[Error] Failed to load any input image or fallback video.")
         return
     else:
       print(f"[VideoSource] Streaming static screenshot: {img_path}")
@@ -926,12 +1721,12 @@ def run_live_scoreboard(
     if sample_f is not None:
       detector.interactive_calibrate_slots(sample_f)
 
-  window_name = "Free Fire Live Scoreboard Tracker [Press 'q' to Quit, 's' to Select Slots]"
+  window_name = "Free Fire Live Scoreboard Tracker ['q' Quit | 's' Slots | 'l' Lock Roster | 'c' Clear]"
   if display:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
 
-  print("\n[Tracker Active] Live video loop running at native FPS. Press 'q' to exit.\n")
+  print("\n[Tracker Active] Controls: 'l' = Lock/Unlock Roster | 's' = Select Slots | 'c' = Clear Teams | 'q' = Quit\n")
 
   frame_interval = 1.0 / target_fps
   last_frame_time = time.time()
@@ -949,13 +1744,12 @@ def run_live_scoreboard(
         if not ret or frame is None:
           print("[VideoSource] Reached end of video. Looping stream...")
           cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+          detector.reset_kill_tracker()
           time.sleep(0.1)
           continue
 
-      # Feed frame to background AI worker
       detector.feed_frame(frame)
 
-      # Smooth Frame Rate Counter
       elapsed = loop_start - last_frame_time
       last_frame_time = loop_start
       if elapsed > 0:
@@ -964,7 +1758,6 @@ def run_live_scoreboard(
           fps_history.pop(0)
         detector.fps_display = sum(fps_history) / float(len(fps_history))
 
-      # Draw Visual Overlay at Full Smooth Frame Rate
       if display:
         overlay = detector.draw_visual_overlay(frame)
         cv2.imshow(window_name, overlay)
@@ -974,8 +1767,11 @@ def run_live_scoreboard(
           break
         elif key == ord('s'):
           detector.interactive_calibrate_slots(frame)
+        elif key == ord('l'):
+          detector.toggle_roster_lock()
+        elif key == ord('c'):
+          detector.clear_persistent_teams()
 
-      # Maintain smooth playback timing
       proc_time = time.time() - loop_start
       sleep_dur = frame_interval - proc_time
       if sleep_dur > 0.001:
