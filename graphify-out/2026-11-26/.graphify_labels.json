@@ -1,0 +1,18 @@
+{
+  "2": "Kill-Feed Detection & Consensus Pipeline",
+  "3": "Scoreboard Kill & Badge Detector",
+  "4": "Frontend Package & Build Config",
+  "7": "Node Broadcast Server & Store",
+  "8": "React Broadcast UI & Pages",
+  "10": "SQLite Kill Event Ledger",
+  "11": "Video Source & Spectator Simulator",
+  "12": "Spectator Squad UI Layout",
+  "13": "WebSocket & SSE Broadcast Hub",
+  "14": "Server Package & Dependencies",
+  "15": "Storm Arena Leaderboard Reference",
+  "16": "HP HUD Overlap Bug Screenshot",
+  "17": "Vision Engine HUD Bug Screenshot",
+  "18": "React SVG Brand Asset",
+  "19": "Server REST API Router",
+  "20": "Vite SVG Brand Asset"
+}

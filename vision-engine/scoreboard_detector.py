@@ -937,13 +937,19 @@ class ThreadedScoreboardDetector:
     self,
     server_url: str = "http://localhost:3001",
     sync_interval: float = 1.2,
-    max_display_teams: int = 12
+    max_display_teams: int = 12,
+    stream_id: str = "default",
+    write_local_json: bool = True,
+    calibration_file: Optional[str] = None
   ):
     os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
     os.environ['no_proxy'] = 'localhost,127.0.0.1'
     self.server_url = server_url.replace("localhost", "127.0.0.1")
     self.sync_interval = sync_interval
-    self.max_display_teams = max_display_teams
+    self.max_display_teams = max(1, int(max_display_teams))
+    self.stream_id = (stream_id or "default").strip() or "default"
+    self.write_local_json = bool(write_local_json)
+    self.calibration_file = calibration_file
     self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     self.color_engine = BadgeColorEngine(vote_window=9, lock_threshold=5)
 
@@ -1023,8 +1029,18 @@ class ThreadedScoreboardDetector:
       state = "MATCH LOCKED" if self.roster_locked else "LOBBY REGISTRATION"
       print(f"[Leaderboard] Mode -> {state} ({len(self.persistent_teams)} teams registered)", flush=True)
 
+  def _resolve_calibration_path(self, for_save: bool = False) -> str:
+    if self.calibration_file:
+      return self.calibration_file if os.path.isabs(self.calibration_file) else os.path.join(self.project_root, self.calibration_file)
+    default_path = os.path.join(self.project_root, 'slot_calibration.json')
+    if self.stream_id != "default":
+      stream_path = os.path.join(self.project_root, f'slot_calibration_{self.stream_id}.json')
+      if for_save or os.path.exists(stream_path):
+        return stream_path
+    return default_path
+
   def _load_saved_calibration(self):
-    calib_file = os.path.join(self.project_root, 'slot_calibration.json')
+    calib_file = self._resolve_calibration_path(for_save=False)
     if os.path.exists(calib_file):
       try:
         with open(calib_file, 'r', encoding='utf-8') as f:
@@ -1032,16 +1048,16 @@ class ThreadedScoreboardDetector:
           if 'slot1' in data and 'slot2' in data:
             self.slot1_norm = data['slot1']
             self.slot2_norm = data['slot2']
-            print("[Calibration] Loaded saved slots from slot_calibration.json")
+            print(f"[Calibration:{self.stream_id}] Loaded saved slots from {os.path.basename(calib_file)}")
       except Exception:
         pass
 
   def _save_calibration(self):
-    calib_file = os.path.join(self.project_root, 'slot_calibration.json')
+    calib_file = self._resolve_calibration_path(for_save=True)
     try:
       with open(calib_file, 'w', encoding='utf-8') as f:
         json.dump({'slot1': self.slot1_norm, 'slot2': self.slot2_norm}, f, indent=2)
-      print("[Calibration] Saved slots to slot_calibration.json")
+      print(f"[Calibration:{self.stream_id}] Saved slots to {os.path.basename(calib_file)}")
     except Exception:
       pass
 
@@ -1398,8 +1414,11 @@ class ThreadedScoreboardDetector:
           sq_alive = sum(1 for p in squad_rows if p['alive'])
 
           # Canonical key = sq_color (guarantees 1 entry per team, updates in place on return)
+          color_slug = sq_color.lower().replace(' ', '-')
+          team_id = f"{self.stream_id}-team-{color_slug}" if self.stream_id != "default" else f"team-{color_slug}"
           visible_teams[sq_color] = {
-            'id': f"team-{sq_color.lower().replace(' ', '-')}",
+            'id': team_id,
+            'streamId': self.stream_id,
             'name': team_display,
             'color': sq_hex,
             'colorName': sq_color,
@@ -1427,9 +1446,10 @@ class ThreadedScoreboardDetector:
               t_obj['isVisible'] = False
 
           for t_key, t_obj in visible_teams.items():
-            # If roster is locked for the match, ignore unregistered/phantom colors
-            if self.roster_locked and t_key not in self.persistent_teams:
-              continue
+            # If roster is locked or stream team cap reached, ignore unregistered/phantom colors
+            if t_key not in self.persistent_teams:
+              if self.roster_locked or len(self.persistent_teams) >= self.max_display_teams:
+                continue
 
             # If team is completely dead (0 alive), NEVER remove it: force all players to 0 HP & DEAD
             if t_obj['alive'] == 0:
@@ -1502,21 +1522,23 @@ class ThreadedScoreboardDetector:
             'killFeed': []
           }
 
-          for target_path in [
-            os.path.join(self.project_root, 'frontend', 'public', 'live_state.json'),
-            os.path.join(self.project_root, 'frontend', 'dist', 'live_state.json'),
-            os.path.join(self.project_root, 'server', 'live_state.json')
-          ]:
-            try:
-              os.makedirs(os.path.dirname(target_path), exist_ok=True)
-              with open(target_path, 'w', encoding='utf-8') as f:
-                json.dump(live_state_obj, f, indent=2)
-            except Exception:
-              pass
+          if self.write_local_json:
+            for target_path in [
+              os.path.join(self.project_root, 'frontend', 'public', 'live_state.json'),
+              os.path.join(self.project_root, 'frontend', 'dist', 'live_state.json'),
+              os.path.join(self.project_root, 'server', 'live_state.json')
+            ]:
+              try:
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, 'w', encoding='utf-8') as f:
+                  json.dump(live_state_obj, f, indent=2)
+              except Exception:
+                pass
 
           try:
             payload = json.dumps({
               'matchId': 'ffws-live-match',
+              'streamId': self.stream_id,
               'teams': ranked_teams
             }).encode('utf-8')
             req = urllib.request.Request(
@@ -1527,10 +1549,10 @@ class ThreadedScoreboardDetector:
             )
             with self.http_opener.open(req, timeout=1.5) as resp:
               if self.total_synced_events % 5 == 1 or self.total_synced_events <= 3 or kill_event_changed:
-                print(f"[VisionEngine] Synced #{self.total_synced_events}: {len(ranked_teams)} teams to backend (Kills: {total_k}, Alive: {total_a})", flush=True)
+                print(f"[VisionEngine:{self.stream_id}] Synced #{self.total_synced_events}: {len(ranked_teams)} teams to backend (Kills: {total_k}, Alive: {total_a})", flush=True)
           except Exception as e:
             if self.total_synced_events % 10 == 1:
-              print(f"[VisionEngine Sync Warning] {e}. Ensure Node server is running on port 3001.", flush=True)
+              print(f"[VisionEngine:{self.stream_id} Sync Warning] {e}. Ensure Node server is running on port 3001.", flush=True)
 
         time.sleep(0.05)
       except Exception as e:
@@ -1651,19 +1673,64 @@ class ThreadedScoreboardDetector:
     return preview
 
 
+def wait_for_stream_barrier(
+  server_url: str,
+  http_opener: urllib.request.OpenerDirector,
+  stream_id: str,
+  expected_peers: int,
+  timeout: float = 15.0
+):
+  """Block briefly until all expected peer streams finish warm-up so frame 0 aligns."""
+  if expected_peers <= 1:
+    return
+  deadline = time.time() + max(1.0, timeout)
+  payload = json.dumps({'streamId': stream_id, 'expected': expected_peers}).encode('utf-8')
+  print(f"[Barrier:{stream_id}] Warm-up ready, waiting for {expected_peers} peer stream(s)...", flush=True)
+  while time.time() < deadline:
+    try:
+      req = urllib.request.Request(
+        f"{server_url}/api/streams/barrier",
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+        method='POST'
+      )
+      with http_opener.open(req, timeout=1.0) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+        if data.get('ready'):
+          print(f"[Barrier:{stream_id}] All {expected_peers} stream(s) ready. Starting frame loop!", flush=True)
+          return
+    except Exception:
+      pass
+    time.sleep(0.025)
+  print(f"[Barrier:{stream_id}] Barrier timeout ({timeout:.1f}s) reached; starting stream immediately.", flush=True)
+
+
 def run_live_scoreboard(
   source: str = "image",
   server_url: str = "http://localhost:3001",
   sync_gap: float = 1.2,
   display: bool = True,
-  calibrate: bool = False
+  calibrate: bool = False,
+  stream_id: str = "default",
+  max_teams: int = 12,
+  write_local_json: bool = True,
+  calibration_file: Optional[str] = None,
+  sync_peers: int = 1,
+  barrier_timeout: float = 15.0
 ):
   print("=" * 72, flush=True)
-  print(" FREE FIRE LIVE SCOREBOARD VISION TRACKER (ASYNC 60 FPS ENGINE)", flush=True)
-  print(f" Source: {source} | Sync Cadence: {sync_gap}s | Backend: {server_url}", flush=True)
+  print(f" FREE FIRE LIVE SCOREBOARD VISION TRACKER [{stream_id}] (ASYNC 60 FPS ENGINE)", flush=True)
+  print(f" Source: {source} | Max Teams: {max_teams} | Sync Cadence: {sync_gap}s | Backend: {server_url}", flush=True)
   print("=" * 72, flush=True)
 
-  detector = ThreadedScoreboardDetector(server_url=server_url, sync_interval=sync_gap, max_display_teams=12)
+  detector = ThreadedScoreboardDetector(
+    server_url=server_url,
+    sync_interval=sync_gap,
+    max_display_teams=max_teams,
+    stream_id=stream_id,
+    write_local_json=write_local_json,
+    calibration_file=calibration_file
+  )
 
   is_image = False
   cap = None
@@ -1716,15 +1783,33 @@ def run_live_scoreboard(
         target_fps = v_fps
     print(f"[VideoSource] Reading from video file: {source} (Target FPS: {target_fps:.1f})")
 
+  if not is_image and (cap is None or not cap.isOpened()):
+    print(f"[Error:{stream_id}] Failed to open video/camera source: {source}", flush=True)
+    detector.running = False
+    return
+
   if calibrate:
     sample_f = frame_cache if is_image else cap.read()[1]
     if sample_f is not None:
       detector.interactive_calibrate_slots(sample_f)
 
-  window_name = "Free Fire Live Scoreboard Tracker ['q' Quit | 's' Slots | 'l' Lock Roster | 'c' Clear]"
+  wait_for_stream_barrier(
+    detector.server_url,
+    detector.http_opener,
+    detector.stream_id,
+    sync_peers,
+    timeout=barrier_timeout
+  )
+
+  stream_tag = f" [{stream_id}]" if stream_id != "default" else ""
+  window_name = f"Free Fire Live Scoreboard Tracker{stream_tag} ['q' Quit | 's' Slots | 'l' Lock Roster | 'c' Clear]"
   if display:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
+    if stream_id == "stream_1":
+      cv2.moveWindow(window_name, 30, 30)
+    elif stream_id == "stream_2":
+      cv2.moveWindow(window_name, 160, 100)
 
   print("\n[Tracker Active] Controls: 'l' = Lock/Unlock Roster | 's' = Select Slots | 'c' = Clear Teams | 'q' = Quit\n")
 
@@ -1795,6 +1880,12 @@ if __name__ == '__main__':
   parser.add_argument("--display", action="store_true", default=True, help="Display OpenCV visual plotting window")
   parser.add_argument("--no-display", dest="display", action="store_false")
   parser.add_argument("--calibrate", action="store_true", help="Launch interactive 2-slot selector on startup")
+  parser.add_argument("--stream-id", type=str, default="default", help="Unique stream identifier (e.g. stream_1, stream_2)")
+  parser.add_argument("--max-teams", type=int, default=12, help="Maximum persistent teams tracked by this stream (e.g. 6 for 6+6 split)")
+  parser.add_argument("--no-local-json", dest="write_local_json", action="store_false", default=True, help="Disable direct live_state.json writes from Python (use in multi-stream)")
+  parser.add_argument("--calibration", type=str, default=None, help="Optional per-stream slot calibration JSON path")
+  parser.add_argument("--sync-peers", type=int, default=1, help="Wait for N total streams at startup barrier before reading frames")
+  parser.add_argument("--barrier-timeout", type=float, default=15.0, help="Max seconds to wait at startup barrier")
 
   args = parser.parse_args()
   run_live_scoreboard(
@@ -1802,5 +1893,11 @@ if __name__ == '__main__':
     server_url=args.server,
     sync_gap=args.gap,
     display=args.display,
-    calibrate=args.calibrate
+    calibrate=args.calibrate,
+    stream_id=args.stream_id,
+    max_teams=args.max_teams,
+    write_local_json=args.write_local_json,
+    calibration_file=args.calibration,
+    sync_peers=args.sync_peers,
+    barrier_timeout=args.barrier_timeout
   )

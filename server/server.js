@@ -27,6 +27,22 @@ const store = new ScoreboardStore();
 // Connected clients for live streaming
 const wsClients = new Set();
 const sseClients = new Set();
+const streamBarriers = new Map(); // barrierKey -> Map<streamId, timestampMs>
+
+function writeLiveStateFiles(state) {
+  try {
+    const stateJson = JSON.stringify(state, null, 2);
+    const targets = [
+      path.join(__dirname, '..', 'frontend', 'public', 'live_state.json'),
+      path.join(__dirname, '..', 'frontend', 'dist', 'live_state.json'),
+      path.join(__dirname, 'live_state.json')
+    ];
+    for (const t of targets) {
+      fs.mkdirSync(path.dirname(t), { recursive: true });
+      fs.writeFileSync(t, stateJson, 'utf8');
+    }
+  } catch {}
+}
 
 function broadcastState(state) {
   const payload = JSON.stringify({
@@ -213,23 +229,52 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body);
         const newState = store.syncScoreboard(payload);
         broadcastState(newState);
-
-        // Also write live_state.json directly to static paths for instant frontend fallback
-        try {
-          const stateJson = JSON.stringify(newState, null, 2);
-          const targets = [
-            path.join(__dirname, '..', 'frontend', 'public', 'live_state.json'),
-            path.join(__dirname, '..', 'frontend', 'dist', 'live_state.json'),
-            path.join(__dirname, 'live_state.json')
-          ];
-          for (const t of targets) {
-            fs.mkdirSync(path.dirname(t), { recursive: true });
-            fs.writeFileSync(t, stateJson, 'utf8');
-          }
-        } catch {}
+        writeLiveStateFiles(newState);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'SYNCED', teamsCount: newState.leaderboard.length }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // API: Multi-stream ready barrier so parallel vision engines start frame-0 together
+  if (url.pathname === '/api/streams/barrier' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const payload = body ? JSON.parse(body) : {};
+        const key = String(payload.key || 'default');
+        if (payload.reset) {
+          streamBarriers.delete(key);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ reset: true, ready: false, arrived: 0 }));
+        }
+
+        const expected = Math.max(1, Number(payload.expected) || 1);
+        const streamId = String(payload.streamId || 'default');
+        const now = Date.now();
+        let entry = streamBarriers.get(key);
+        if (!entry) {
+          entry = new Map();
+          streamBarriers.set(key, entry);
+        }
+        // Drop stale registrations older than 30s so restarted runs never use old check-ins
+        for (const [id, ts] of entry.entries()) {
+          if (now - ts > 30000) entry.delete(id);
+        }
+        entry.set(streamId, now);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ready: entry.size >= expected,
+          arrived: entry.size,
+          expected
+        }));
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
@@ -253,7 +298,9 @@ const server = http.createServer((req, res) => {
   // API: Reset Match
   if (url.pathname === '/api/match/reset' && req.method === 'POST') {
     const newState = store.reset();
+    streamBarriers.clear();
     broadcastState(newState);
+    writeLiveStateFiles(newState);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ success: true, message: 'Match reset' }));
   }

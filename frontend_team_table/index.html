@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FFWS Esports Live Broadcast - Squad Roster HUD</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com" rel="preconnect" />
+  <link crossorigin href="https://fonts.gstatic.com" rel="preconnect" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,400;0,600;0,700;1,700&family=Rajdhani:wght@500;600;700;800&family=Teko:wght@500;600;700&display=swap"
+    rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            rajdhani: ['Rajdhani', 'sans-serif'],
+            chakra: ['Chakra Petch', 'sans-serif'],
+            teko: ['Teko', 'sans-serif'],
+          },
+          colors: {
+            ffws: {
+              gold: '#F6C33B',
+              goldLight: '#FFDF6D',
+              purpleDeep: '#0f0826',
+              purpleCard: '#1a0d3b',
+              purpleBar: '#311860',
+              purpleAccent: '#7e22ce',
+              neonCyan: '#00f2fe',
+              neonPurple: '#a855f7',
+              knockedRed: '#ef4444',
+              healthGreen: '#10b981',
+            },
+          },
+        },
+      },
+    };
+  </script>
+</head>
+
+<body
+  class="bg-[#090514] text-gray-100 min-h-screen font-hud antialiased selection:bg-purple-600 selection:text-white bg-tactical-grid relative overflow-x-hidden">
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+
+</html>
