@@ -53,6 +53,38 @@ class HPTrackerPipeline:
         """Manually unlocks the bar positions to allow re-acquisition."""
         self.dark_masker.reset_lock()
 
+    def recalibrate_from_border(
+        self,
+        frame: np.ndarray,
+        bx: int,
+        by: int,
+        bw: int,
+        bh: int,
+        save: bool = True
+    ) -> Tuple[List[List[float]], List[float]]:
+        """
+        Recalibrates dark-masking canvas and 4 HP bar ROIs from a user-drawn bounding box,
+        locks them immediately onto the frame, flushes stale temporal buffers, and persists
+        the updated configuration to disk.
+        """
+        bars_roi, canvas_roi = DarkMasker.extract_bars_from_border(frame, bx, by, bw, bh, num_bars=4)
+        self.dark_masker.update_rois(bars_roi, canvas_roi, lock_immediately=True)
+        h, w = frame.shape[:2]
+        self.dark_masker.frame_dims = (w, h)
+        self.dark_masker._lock_from_config_immediately(w, h)
+        self.temporal_filter.flush_buffers()
+
+        self.config["canvas_roi"] = canvas_roi
+        self.config["bars_roi"] = bars_roi
+        self.config["locked"] = True
+
+        if save and self.config_path:
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2)
+
+        return bars_roi, canvas_roi
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -202,8 +234,17 @@ class HPTrackerPipeline:
                 pip_canvas = cv2.resize(dark_canvas, (pip_w, pip_h), interpolation=cv2.INTER_NEAREST)
 
                 py1 = h - pip_h - 40
-                py2 = py1 + pip_h
                 px1 = 10
+                # Avoid covering the tracked HP canvas when HUD bars are in the bottom-left
+                if not (px1 + pip_w < cx1 or px1 > cx2 or py1 + pip_h < cy1 or py1 > cy2):
+                    alt_x = cx2 + 18
+                    if alt_x + pip_w <= w - 10:
+                        px1 = alt_x
+                    else:
+                        py1 = 56
+                        px1 = max(10, (w - pip_w) // 2)
+
+                py2 = py1 + pip_h
                 px2 = px1 + pip_w
 
                 if py1 > 0 and px2 < w:

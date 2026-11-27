@@ -1,0 +1,50 @@
+{
+  "RED": {
+    "name": "team 1",
+    "tag": "1"
+  },
+  "ORANGE": {
+    "name": "team 2",
+    "tag": "2"
+  },
+  "YELLOW": {
+    "name": "team 3",
+    "tag": "3"
+  },
+  "GREEN": {
+    "name": "team 4",
+    "tag": "4"
+  },
+  "MINT GREEN": {
+    "name": "team 5",
+    "tag": "5"
+  },
+  "CYAN": {
+    "name": "team 6",
+    "tag": "6"
+  },
+  "BLUE": {
+    "name": "team 7",
+    "tag": "7"
+  },
+  "PURPLE": {
+    "name": "team 8",
+    "tag": "8"
+  },
+  "PINK": {
+    "name": "team 9",
+    "tag": "9"
+  },
+  "BROWN": {
+    "name": "team 10",
+    "tag": "10"
+  },
+  "GRAY": {
+    "name": "team 11",
+    "tag": "11"
+  },
+  "WHITE": {
+    "name": "team 12",
+    "tag": "12"
+  }
+}

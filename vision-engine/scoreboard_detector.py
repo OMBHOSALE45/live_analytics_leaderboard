@@ -6,11 +6,28 @@ import argparse
 import threading
 import subprocess
 import socket
+import http.client
+import urllib.parse
 import urllib.request
 import cv2
 import numpy as np
 from collections import deque, Counter
 from typing import Dict, List, Tuple, Optional, Any
+
+try:
+  from team_names import (
+    default_team_names_path,
+    load_team_names,
+    prompt_lobby_team_names,
+    resolve_team_identity,
+  )
+except ImportError:
+  from .team_names import (
+    default_team_names_path,
+    load_team_names,
+    prompt_lobby_team_names,
+    resolve_team_identity,
+  )
 
 try:
   from rapidocr_onnxruntime import RapidOCR
@@ -940,7 +957,11 @@ class ThreadedScoreboardDetector:
     max_display_teams: int = 12,
     stream_id: str = "default",
     write_local_json: bool = True,
-    calibration_file: Optional[str] = None
+    calibration_file: Optional[str] = None,
+    hp_config_file: Optional[str] = None,
+    role: str = "scoreboard",
+    enable_hp: bool = True,
+    team_names_file: Optional[str] = None
   ):
     os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
     os.environ['no_proxy'] = 'localhost,127.0.0.1'
@@ -950,7 +971,14 @@ class ThreadedScoreboardDetector:
     self.stream_id = (stream_id or "default").strip() or "default"
     self.write_local_json = bool(write_local_json)
     self.calibration_file = calibration_file
+    self.hp_config_file = hp_config_file
+    self.role = (role or "scoreboard").strip().lower()
+    self.enable_hp = bool(enable_hp)
     self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    self.team_names_file = team_names_file or default_team_names_path(self.project_root)
+    self.team_name_map = load_team_names(self.team_names_file)
+    if self.team_name_map:
+      print(f"[Roster:{self.stream_id}] Loaded {len(self.team_name_map)} slot-color team names from {os.path.basename(self.team_names_file)}.")
     self.color_engine = BadgeColorEngine(vote_window=9, lock_threshold=5)
 
     self.http_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -960,6 +988,7 @@ class ThreadedScoreboardDetector:
 
     self.slot1_norm = [0.693, 0.075, 0.889, 0.968]
     self.slot2_norm = [0.879, 0.075, 0.945, 0.968]
+    self.slot3_norm: Optional[List[float]] = None
     self._load_saved_calibration()
 
     base_dir = os.path.dirname(__file__)
@@ -983,27 +1012,52 @@ class ThreadedScoreboardDetector:
     self.scroll_settling_frames: int = 0
     self.scroll_diff_threshold: float = 14.0
 
+    self.hp_lock = threading.Lock()
     self.hp_pipeline = None
-    try:
-      sys.path.append(os.path.abspath(self.project_root))
-      sys.path.append(os.path.abspath(os.path.join(self.project_root, '..')))
-      from hp_tracker.core.hp_pipeline import HPTrackerPipeline
-      self.hp_pipeline = HPTrackerPipeline()
-      print("[HPTracker] Dark-Masked Health Bar Pipeline initialized successfully.")
-    except Exception as e:
-      print(f"[HPTracker Info] HP Pipeline not active: {e}")
+    if self.enable_hp:
+      try:
+        sys.path.append(os.path.abspath(self.project_root))
+        sys.path.append(os.path.abspath(os.path.join(self.project_root, '..')))
+        from hp_tracker.core.hp_pipeline import HPTrackerPipeline
+        hp_cfg_path = self._resolve_hp_config_path()
+        self.hp_pipeline = HPTrackerPipeline(config_path=hp_cfg_path)
+        print(f"[HPTracker:{self.stream_id}] Dark-Masked Health Bar Pipeline initialized ({os.path.basename(hp_cfg_path)}).")
+      except Exception as e:
+        print(f"[HPTracker Info] HP Pipeline not active: {e}")
 
     self.running = True
     self.lock = threading.Lock()
     self.current_frame = None
+    self.hp_frame = None
     self.latest_result = None
+    self.latest_hp_result = None
+    self.latest_spectator_hp = None
+    self.latest_spectated_team = None
+    self.spectated_row: Optional[int] = None
+    self.spectated_color: Optional[str] = None
+    self.spectated_player_names: List[str] = []
+    self.prev_slot3_small: Optional[np.ndarray] = None
+    self.last_synced_names_sig = None
     self.fps_display = 30.0
     self.total_synced_events = 0
     self.last_sync_time = 0.0
     self.last_synced_total_kills = -1
+    self.last_synced_hp_sig = None
+    self.last_synced_spectator_sig = None
+
+    parsed_srv = urllib.parse.urlparse(self.server_url)
+    self._server_host = parsed_srv.hostname or '127.0.0.1'
+    self._server_port = parsed_srv.port or 3001
+    self._http_conn: Optional[http.client.HTTPConnection] = None
+    self._http_lock = threading.Lock()
+
+    self.ai_event = threading.Event()
+    self.hp_event = threading.Event()
 
     self.worker_thread = threading.Thread(target=self._ai_worker_loop, daemon=True)
     self.worker_thread.start()
+    self.hp_thread = threading.Thread(target=self._hp_worker_loop, daemon=True)
+    self.hp_thread.start()
 
   def reset_kill_tracker(self):
     with self.lock:
@@ -1029,6 +1083,17 @@ class ThreadedScoreboardDetector:
       state = "MATCH LOCKED" if self.roster_locked else "LOBBY REGISTRATION"
       print(f"[Leaderboard] Mode -> {state} ({len(self.persistent_teams)} teams registered)", flush=True)
 
+  def _resolve_hp_config_path(self, for_save: bool = False) -> str:
+    if self.hp_config_file:
+      return self.hp_config_file if os.path.isabs(self.hp_config_file) else os.path.join(self.project_root, self.hp_config_file)
+    cfg_dir = os.path.join(self.project_root, 'hp_tracker', 'config')
+    default_cfg = os.path.join(cfg_dir, 'hp_config.json')
+    if self.stream_id != "default":
+      stream_cfg = os.path.join(cfg_dir, f'hp_config_{self.stream_id}.json')
+      if for_save or os.path.exists(stream_cfg):
+        return stream_cfg
+    return default_cfg
+
   def _resolve_calibration_path(self, for_save: bool = False) -> str:
     if self.calibration_file:
       return self.calibration_file if os.path.isabs(self.calibration_file) else os.path.join(self.project_root, self.calibration_file)
@@ -1048,15 +1113,20 @@ class ThreadedScoreboardDetector:
           if 'slot1' in data and 'slot2' in data:
             self.slot1_norm = data['slot1']
             self.slot2_norm = data['slot2']
-            print(f"[Calibration:{self.stream_id}] Loaded saved slots from {os.path.basename(calib_file)}")
+          if 'slot3' in data and isinstance(data['slot3'], list) and len(data['slot3']) == 4:
+            self.slot3_norm = data['slot3']
+          print(f"[Calibration:{self.stream_id}] Loaded saved slots from {os.path.basename(calib_file)}")
       except Exception:
         pass
 
   def _save_calibration(self):
     calib_file = self._resolve_calibration_path(for_save=True)
     try:
+      payload = {'slot1': self.slot1_norm, 'slot2': self.slot2_norm}
+      if self.slot3_norm is not None:
+        payload['slot3'] = self.slot3_norm
       with open(calib_file, 'w', encoding='utf-8') as f:
-        json.dump({'slot1': self.slot1_norm, 'slot2': self.slot2_norm}, f, indent=2)
+        json.dump(payload, f, indent=2)
       print(f"[Calibration:{self.stream_id}] Saved slots to {os.path.basename(calib_file)}")
     except Exception:
       pass
@@ -1140,8 +1210,244 @@ class ThreadedScoreboardDetector:
 
     return "GRAY", "#9EA7B0"
 
+  def _post_sync_fast(self, payload_bytes: bytes) -> Optional[Dict[str, Any]]:
+    """Sends sync payload over a persistent TCP_NODELAY HTTP connection (< 1ms on loopback)."""
+    headers = {'Content-Type': 'application/json', 'Connection': 'keep-alive'}
+    with self._http_lock:
+      for _ in range(2):
+        try:
+          if self._http_conn is None:
+            self._http_conn = http.client.HTTPConnection(self._server_host, self._server_port, timeout=1.0)
+            self._http_conn.connect()
+            if self._http_conn.sock is not None:
+              self._http_conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+          self._http_conn.request('POST', '/api/scoreboard/sync', body=payload_bytes, headers=headers)
+          resp = self._http_conn.getresponse()
+          raw = resp.read()
+          if 200 <= resp.status < 300:
+            try:
+              return json.loads(raw.decode('utf-8')) if raw else {}
+            except Exception:
+              return {}
+          return None
+        except Exception:
+          try:
+            if self._http_conn is not None:
+              self._http_conn.close()
+          except Exception:
+            pass
+          self._http_conn = None
+      return None
+
+  def get_slot3_pixels(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    if not self.slot3_norm or frame is None or frame.size == 0:
+      return None
+    h, w = frame.shape[:2]
+    x1 = max(0, int(self.slot3_norm[0] * w))
+    y1 = max(0, int(self.slot3_norm[1] * h))
+    x2 = min(w, int(self.slot3_norm[2] * w))
+    y2 = min(h, int(self.slot3_norm[3] * h))
+    if x2 <= x1 or y2 <= y1:
+      return None
+    return (x1, y1, x2, y2)
+
+  def interactive_calibrate_name_slot(self, frame: np.ndarray) -> bool:
+    """
+    Lets the operator drag a single box around the 4 spectated player names
+    on the live stream feed (Slot 3) so OCR directs stats to their owning team.
+    """
+    h, w = frame.shape[:2]
+    guide = frame.copy()
+    cv2.rectangle(guide, (0, 0), (w, 42), (20, 15, 30), -1)
+    cv2.line(guide, (0, 42), (w, 42), (255, 80, 220), 2)
+    cv2.putText(
+      guide,
+      f"PLAYER NAMES SLOT [{self.stream_id}]: Drag box around the 4 spectated player names -> ENTER/SPACE",
+      (16, 28),
+      cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 160, 255), 1, cv2.LINE_AA
+    )
+    win_title = f"Select Slot 3: Spectator Player Names [{self.stream_id}]"
+    cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_title, min(1280, w), min(720, h))
+    roi3 = cv2.selectROI(win_title, guide, fromCenter=False, showCrosshair=True)
+    cv2.destroyWindow(win_title)
+
+    if roi3[2] > 15 and roi3[3] > 20:
+      self.slot3_norm = [
+        round(roi3[0] / float(w), 4),
+        round(roi3[1] / float(h), 4),
+        round((roi3[0] + roi3[2]) / float(w), 4),
+        round((roi3[1] + roi3[3]) / float(h), 4),
+      ]
+      self.prev_slot3_small = None
+      self.spectated_player_names = []
+      self.last_synced_names_sig = None
+      self._save_calibration()
+      print(f"[Calibration:{self.stream_id}] Saved Slot 3 (Spectator Player Names): {self.slot3_norm}", flush=True)
+      return True
+    print(f"[Calibration:{self.stream_id}] Player names slot selection canceled.", flush=True)
+    return False
+
+  def extract_spectator_player_names(self, frame: np.ndarray) -> Tuple[List[str], bool]:
+    """
+    Change-gated RapidOCR on Slot 3 (4 spectated player names).
+    Static frames skip OCR in <0.2ms; team switches trigger OCR and return (names, True).
+    """
+    s3 = self.get_slot3_pixels(frame)
+    if s3 is None or self.ocr is None:
+      return [], False
+
+    crop = frame[s3[1]:s3[3], s3[0]:s3[2]]
+    if crop.size == 0:
+      return [], False
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (48, 48), interpolation=cv2.INTER_AREA)
+    if self.prev_slot3_small is not None and self.spectated_player_names:
+      diff = float(np.mean(cv2.absdiff(small, self.prev_slot3_small)))
+      if diff < 7.5:
+        return self.spectated_player_names, False
+    self.prev_slot3_small = small
+
+    try:
+      ocr_res, _ = self.ocr(crop)
+    except Exception:
+      ocr_res = None
+
+    slots = ["", "", "", ""]
+    ch = max(1.0, float(crop.shape[0]))
+    row_h = ch / 4.0
+    for item in (ocr_res or []):
+      text = str(item[1]).strip()
+      if len(text) < 2 or text in ("ALL", "NEARBY"):
+        continue
+      cy = (item[0][0][1] + item[0][2][1]) / 2.0
+      idx = max(0, min(3, int(cy / row_h)))
+      if not slots[idx]:
+        slots[idx] = text
+      else:
+        slots[idx] = f"{slots[idx]} {text}".strip()
+
+    names = [s for s in slots if s]
+    if names and names != self.spectated_player_names:
+      self.spectated_player_names = slots
+      return slots, True
+    if not self.spectated_player_names and any(slots):
+      self.spectated_player_names = slots
+      return slots, True
+    return self.spectated_player_names, False
+
+  def _build_spectator_hp(self, hp_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not hp_result or not hp_result.get('players'):
+      return None
+    return {
+      'streamId': self.stream_id,
+      'isLocked': bool(hp_result.get('is_locked', False)),
+      'latencyMs': float(hp_result.get('latency_ms', 0.0)),
+      'players': [
+        {
+          'slot': int(p['slot']),
+          'hp': round(float(p['hp']), 1),
+          'state': str(p['state']),
+          'isRed': bool(p.get('is_red', False)),
+          'alive': str(p['state']) != 'DEAD'
+        }
+        for p in hp_result['players']
+      ]
+    }
+
+  @staticmethod
+  def detect_yellow_eye_row(
+    frame: np.ndarray,
+    s2_coords: Tuple[int, int, int, int],
+    num_rows: int = 12
+  ) -> Optional[int]:
+    """
+    Sub-1ms vectorized detector for the golden-yellow spectator eye badge
+    sitting along the right edge of Slot 2. Returns row index (0..11) or None.
+    """
+    if frame is None or frame.size == 0:
+      return None
+    h, w = frame.shape[:2]
+    sx1, sy1, sx2, sy2 = s2_coords
+    if sy2 <= sy1 or sx2 <= sx1:
+      return None
+
+    pad_left = max(10, int((sx2 - sx1) * 0.25))
+    pad_right = max(44, int(0.07 * w))
+    ex1 = max(0, sx2 - pad_left)
+    ex2 = min(w, sx2 + pad_right)
+    if ex2 <= ex1:
+      return None
+
+    strip = frame[sy1:sy2, ex1:ex2]
+    b = strip[:, :, 0].astype(np.int16)
+    g = strip[:, :, 1].astype(np.int16)
+    r = strip[:, :, 2].astype(np.int16)
+    yellow_mask = (r >= 175) & (g >= 135) & (b <= 95) & ((r - b) >= 85) & ((g - b) >= 55)
+
+    sh = strip.shape[0]
+    row_h = sh / float(num_rows)
+    scores = [int(np.count_nonzero(yellow_mask[int(i * row_h):int((i + 1) * row_h)])) for i in range(num_rows)]
+    best_idx = int(np.argmax(scores))
+    best_score = scores[best_idx]
+    sorted_scores = sorted(scores, reverse=True)
+    second = sorted_scores[1] if len(sorted_scores) > 1 else 0
+    if best_score >= 18 and best_score >= second * 1.4:
+      return best_idx
+    return None
+
+  def _hp_worker_loop(self):
+    """Dedicated sub-millisecond HP & Knocked tracker woken immediately on every frame."""
+    while self.running:
+      self.hp_event.wait(timeout=0.05)
+      self.hp_event.clear()
+      if not self.running or self.hp_pipeline is None:
+        continue
+      frame = None
+      with self.lock:
+        if self.hp_frame is not None:
+          frame = self.hp_frame
+          self.hp_frame = None
+        spectated_color = self.spectated_color
+        spectated_team = self.latest_spectated_team
+      if frame is None:
+        continue
+      try:
+        if self.role == "spectator":
+          _, s2_coords = self.get_slot_pixels(frame)
+          eye_row = self.detect_yellow_eye_row(frame, s2_coords, num_rows=12)
+          if eye_row is not None:
+            with self.lock:
+              self.spectated_row = eye_row
+
+        with self.hp_lock:
+          hp_result = self.hp_pipeline.process_frame(frame, team_id=spectated_color)
+        spectator_hp = self._build_spectator_hp(hp_result)
+        with self.lock:
+          self.latest_hp_result = hp_result
+          self.latest_spectator_hp = spectator_hp
+
+        if spectator_hp is not None:
+          hp_sig = tuple((p['slot'], round(p['hp'] * 2.0), p['state'], p['isRed']) for p in spectator_hp['players'])
+          if hp_sig != self.last_synced_hp_sig:
+            self.last_synced_hp_sig = hp_sig
+            sync_body = {
+              'matchId': 'ffws-live-match',
+              'streamId': self.stream_id,
+              'spectatorHp': spectator_hp,
+              'hpOnly': True
+            }
+            if self.role == "spectator" and spectated_team is not None:
+              sync_body['spectatorTeam'] = spectated_team
+            self._post_sync_fast(json.dumps(sync_body).encode('utf-8'))
+      except Exception:
+        pass
+
   def stop(self):
     self.running = False
+    self.hp_event.set()
+    self.ai_event.set()
 
   def get_slot_pixels(self, frame: np.ndarray) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]:
     h, w = frame.shape[:2]
@@ -1193,6 +1499,47 @@ class ThreadedScoreboardDetector:
       ]
       self.reset_kill_tracker()
       self._save_calibration()
+
+  def interactive_calibrate_hp_border(self, frame: np.ndarray) -> bool:
+    """
+    Lets the user drag a bounding box anywhere on screen around the 4 in-game HP bars,
+    re-derives the dark-mask canvas and white-bar ROIs, locks them immediately, and saves
+    to the active HP config file.
+    """
+    if self.hp_pipeline is None:
+      print("[HPTracker Warning] HP Pipeline is not active; cannot recalibrate HP border.", flush=True)
+      return False
+
+    h, w = frame.shape[:2]
+    guide_frame = frame.copy()
+    cv2.rectangle(guide_frame, (0, 0), (w, 42), (20, 15, 30), -1)
+    cv2.line(guide_frame, (0, 42), (w, 42), (0, 230, 255), 2)
+    cv2.putText(
+      guide_frame,
+      f"HP BORDER [{self.stream_id}]: Drag box around all 4 in-game HP bars -> ENTER/SPACE (ESC cancel)",
+      (16, 28),
+      cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 1, cv2.LINE_AA
+    )
+
+    win_title = f"Select HP Border [{self.stream_id}]"
+    cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_title, min(1280, w), min(720, h))
+    roi = cv2.selectROI(win_title, guide_frame, fromCenter=False, showCrosshair=True)
+    cv2.destroyWindow(win_title)
+
+    bx, by, bw, bh = roi
+    if bw < 20 or bh < 20:
+      print(f"[HPTracker:{self.stream_id}] HP border recalibration canceled.", flush=True)
+      return False
+
+    save_path = self._resolve_hp_config_path(for_save=True)
+    with self.hp_lock:
+      self.hp_pipeline.config_path = save_path
+      bars_roi, canvas_roi = self.hp_pipeline.recalibrate_from_border(frame, bx, by, bw, bh, save=True)
+    print(f"[HPTracker:{self.stream_id}] Dark-mask HP bars recalibrated & locked -> {os.path.basename(save_path)}", flush=True)
+    print(f"  canvas_roi={canvas_roi}", flush=True)
+    print(f"  bars_roi={bars_roi}", flush=True)
+    return True
 
   def _detect_scoreboard_scroll(self, slot1_bgr: np.ndarray) -> bool:
     """
@@ -1387,13 +1734,20 @@ class ThreadedScoreboardDetector:
               loser['skip_persist'] = True
 
         # Pass 3: Build currently visible player & team structures
+        eye_row = self.detect_yellow_eye_row(frame, s2_coords, num_rows=num_rows) if self.role == "spectator" else None
+        spectated_sq_idx = (eye_row // squad_size) if eye_row is not None else None
+
         parsed_players = []
         visible_teams: Dict[str, Dict[str, Any]] = {}
+        spectated_team_obj: Optional[Dict[str, Any]] = None
+        spectated_color_now: Optional[str] = None
+
         for d in squad_drafts:
           squad_rows = d['rows']
           sq_color = d['color']
           sq_hex = d['hex']
-          team_display = f"TEAM {sq_color}"
+          team_display, team_tag = resolve_team_identity(self.team_name_map, sq_color, self.stream_id)
+          is_spectated_squad = (spectated_sq_idx is not None and d['sq_idx'] == spectated_sq_idx)
 
           for p in squad_rows:
             if p['alive']:
@@ -1406,36 +1760,51 @@ class ThreadedScoreboardDetector:
             p['squadHex'] = sq_hex
             parsed_players.append(p)
 
-          # Skip transient duplicate-color collisions so they never pollute persistent_teams
-          if d.get('skip_persist') or sq_color in ("UNKNOWN", "DIMMED"):
-            continue
-
           sq_kills = sum(p['kills'] for p in squad_rows)
           sq_alive = sum(1 for p in squad_rows if p['alive'])
-
-          # Canonical key = sq_color (guarantees 1 entry per team, updates in place on return)
           color_slug = sq_color.lower().replace(' ', '-')
           team_id = f"{self.stream_id}-team-{color_slug}" if self.stream_id != "default" else f"team-{color_slug}"
-          visible_teams[sq_color] = {
+          team_payload = {
             'id': team_id,
             'streamId': self.stream_id,
             'name': team_display,
+            'clanTag': team_tag,
             'color': sq_hex,
             'colorName': sq_color,
             'kills': sq_kills,
             'alive': sq_alive,
             'isVisible': True,
+            'isSpectated': is_spectated_squad,
             'lastSeen': now,
             'players': [{
-              'slot': p['slot'],
+              'slot': idx_in_sq + 1,
               'name': p['name'],
               'kills': p['kills'],
               'alive': p['alive'],
               'color': p['color'],
               'hex': p['hex'],
               'hp': p.get('hp', 100.0 if p['alive'] else 0.0)
-            } for p in squad_rows]
+            } for idx_in_sq, p in enumerate(squad_rows)]
           }
+
+          if is_spectated_squad:
+            spectated_team_obj = team_payload
+            spectated_color_now = sq_color
+
+          # Skip transient duplicate-color collisions so they never pollute persistent_teams
+          if d.get('skip_persist') or sq_color in ("UNKNOWN", "DIMMED"):
+            continue
+
+          # Canonical key = sq_color (guarantees 1 entry per team, updates in place on return)
+          visible_teams[sq_color] = team_payload
+
+        if self.role == "spectator":
+          with self.lock:
+            if eye_row is not None:
+              self.spectated_row = eye_row
+            if spectated_team_obj is not None:
+              self.latest_spectated_team = spectated_team_obj
+              self.spectated_color = spectated_color_now
 
         # Pass 3B: Lobby Registration & Match-Locked In-Place Updates
         if self.scroll_settling_frames > 0:
@@ -1477,10 +1846,16 @@ class ThreadedScoreboardDetector:
         for rank_idx, t in enumerate(ranked_teams):
           t['rank'] = rank_idx + 1
 
-        hp_result = None
-        if self.hp_pipeline is not None:
+        with self.lock:
+          hp_result = self.latest_hp_result
+          spectator_hp = self.latest_spectator_hp
+          spectated_team = self.latest_spectated_team
+
+        if hp_result is None and self.hp_pipeline is not None:
           try:
-            hp_result = self.hp_pipeline.process_frame(frame)
+            with self.hp_lock:
+              hp_result = self.hp_pipeline.process_frame(frame, team_id=self.spectated_color)
+            spectator_hp = self._build_spectator_hp(hp_result)
           except Exception:
             pass
 
@@ -1489,6 +1864,9 @@ class ThreadedScoreboardDetector:
           'teams': ranked_teams,
           'parsed_players': parsed_players,
           'hp_result': hp_result,
+          'spectatorHp': spectator_hp,
+          'spectatorTeam': spectated_team,
+          'spectatedRow': self.spectated_row,
           's1_coords': s1_coords,
           's2_coords': s2_coords
         }
@@ -1499,7 +1877,52 @@ class ThreadedScoreboardDetector:
         total_k = sum(t['kills'] for t in ranked_teams)
         kill_event_changed = (self.last_synced_total_kills != -1 and total_k != self.last_synced_total_kills)
 
-        if (now - self.last_sync_time >= self.sync_interval) or (self.total_synced_events == 0 and len(ranked_teams) > 0) or kill_event_changed:
+        spec_sig = (
+          spectated_team['name'],
+          spectated_team['kills'],
+          tuple((p['name'], p['kills']) for p in spectated_team['players'])
+        ) if spectated_team else None
+        spec_changed = (spec_sig is not None and spec_sig != self.last_synced_spectator_sig)
+
+        if self.role == "spectator":
+          slot3_names, names_changed = self.extract_spectator_player_names(frame)
+          names_sig = tuple(slot3_names) if any(slot3_names) else None
+          if names_sig is not None and names_sig != self.last_synced_names_sig:
+            names_changed = True
+
+          # Spectator feed syncs spectatorTeam / spectatedPlayerNames + spectatorHp (never overwrites 12-team leaderboard)
+          if spec_changed or names_changed or (now - self.last_sync_time >= self.sync_interval and (spectated_team is not None or spectator_hp is not None or names_sig is not None)):
+            self.last_sync_time = now
+            if spec_sig is not None:
+              self.last_synced_spectator_sig = spec_sig
+            if names_sig is not None:
+              self.last_synced_names_sig = names_sig
+            self.total_synced_events += 1
+            sync_body = {
+              'matchId': 'ffws-live-match',
+              'streamId': self.stream_id,
+              'hpOnly': True,
+            }
+            if spectated_team is not None:
+              sync_body['spectatorTeam'] = spectated_team
+            if names_sig is not None:
+              sync_body['spectatedPlayerNames'] = slot3_names
+            if spectator_hp is not None:
+              sync_body['spectatorHp'] = spectator_hp
+            resp_data = self._post_sync_fast(json.dumps(sync_body).encode('utf-8'))
+            if resp_data:
+              matched_col = resp_data.get('spectatedColor')
+              if matched_col and spectated_team is None:
+                with self.lock:
+                  self.spectated_color = matched_col
+              if self.total_synced_events % 10 == 1 or spec_changed or names_changed:
+                t_lbl = resp_data.get('spectatedTeamName') or (spectated_team['name'] if spectated_team else 'N/A')
+                print(f"[Spectator:{self.stream_id}] Active={t_lbl} | EyeRow={self.spectated_row} | Names={slot3_names}", flush=True)
+        elif (
+          (now - self.last_sync_time >= self.sync_interval)
+          or (self.total_synced_events == 0 and (len(ranked_teams) > 0 or spectator_hp is not None))
+          or kill_event_changed
+        ):
           self.last_sync_time = now
           self.last_synced_total_kills = total_k
           self.total_synced_events += 1
@@ -1512,6 +1935,7 @@ class ThreadedScoreboardDetector:
               'status': 'LIVE',
               'lastSync': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'visionEngineActive': True,
+              'spectatorHp': spectator_hp,
               'stats': {
                 'totalKills': total_k,
                 'squadsAlive': sum(1 for t in ranked_teams if t['alive'] > 0),
@@ -1519,6 +1943,7 @@ class ThreadedScoreboardDetector:
               }
             },
             'leaderboard': ranked_teams,
+            'spectatorHp': spectator_hp,
             'killFeed': []
           }
 
@@ -1535,42 +1960,44 @@ class ThreadedScoreboardDetector:
               except Exception:
                 pass
 
-          try:
-            payload = json.dumps({
-              'matchId': 'ffws-live-match',
-              'streamId': self.stream_id,
-              'teams': ranked_teams
-            }).encode('utf-8')
-            req = urllib.request.Request(
-              f"{self.server_url}/api/scoreboard/sync",
-              data=payload,
-              headers={'Content-Type': 'application/json'},
-              method='POST'
-            )
-            with self.http_opener.open(req, timeout=1.5) as resp:
-              if self.total_synced_events % 5 == 1 or self.total_synced_events <= 3 or kill_event_changed:
-                print(f"[VisionEngine:{self.stream_id}] Synced #{self.total_synced_events}: {len(ranked_teams)} teams to backend (Kills: {total_k}, Alive: {total_a})", flush=True)
-          except Exception as e:
-            if self.total_synced_events % 10 == 1:
-              print(f"[VisionEngine:{self.stream_id} Sync Warning] {e}. Ensure Node server is running on port 3001.", flush=True)
+          sync_body = {
+            'matchId': 'ffws-live-match',
+            'streamId': self.stream_id,
+            'teams': ranked_teams
+          }
+          if spectator_hp is not None:
+            sync_body['spectatorHp'] = spectator_hp
+          payload = json.dumps(sync_body).encode('utf-8')
+          ok = self._post_sync_fast(payload)
+          if ok:
+            if self.total_synced_events % 5 == 1 or self.total_synced_events <= 3 or kill_event_changed:
+              print(f"[VisionEngine:{self.stream_id}] Synced #{self.total_synced_events}: {len(ranked_teams)} teams to backend (Kills: {total_k}, Alive: {total_a})", flush=True)
+          elif self.total_synced_events % 10 == 1:
+            print(f"[VisionEngine:{self.stream_id} Sync Warning] Ensure Node server is running on {self.server_url}.", flush=True)
 
-        time.sleep(0.05)
+        self.ai_event.wait(timeout=0.015)
+        self.ai_event.clear()
       except Exception as e:
         print(f"[_ai_worker_loop Error] {e}", flush=True)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
   def feed_frame(self, frame: np.ndarray):
     with self.lock:
       self.current_frame = frame
+      self.hp_frame = frame
+    self.hp_event.set()
+    self.ai_event.set()
 
   def draw_visual_overlay(self, frame: np.ndarray) -> np.ndarray:
     preview = frame.copy()
     h, w = preview.shape[:2]
 
     res = None
+    hp_res = None
     with self.lock:
       if self.latest_result is not None:
         res = self.latest_result
+      hp_res = self.latest_hp_result or (res.get('hp_result') if res else None)
 
     if res is None:
       cv2.putText(preview, "INITIALIZING AI VISION ENGINE...", (40, 60),
@@ -1588,6 +2015,17 @@ class ThreadedScoreboardDetector:
     cv2.rectangle(preview, (s2[0], s2[1]), (s2[2], s2[3]), (0, 230, 255), 2)
     cv2.putText(preview, "SLOT 2: KILLS", (s2[0] - 15, max(20, s2[1] - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 230, 255), 1, cv2.LINE_AA)
+
+    s3 = self.get_slot3_pixels(frame)
+    if s3 is not None:
+      cv2.rectangle(preview, (s3[0], s3[1]), (s3[2], s3[3]), (255, 80, 220), 2)
+      cv2.putText(preview, "SLOT 3: PLAYER NAMES", (s3[0], max(20, s3[1] - 8)),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 160, 255), 1, cv2.LINE_AA)
+      for n_idx, p_name in enumerate(self.spectated_player_names[:4]):
+        if p_name:
+          ny = s3[1] + int((n_idx + 0.65) * ((s3[3] - s3[1]) / 4.0))
+          cv2.putText(preview, p_name, (s3[2] + 6, ny),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 180, 255), 1, cv2.LINE_AA)
 
     for idx_p, p in enumerate(res.get('parsed_players', [])):
       y0, y1 = p.get('y_range', (0, 0))
@@ -1617,6 +2055,11 @@ class ThreadedScoreboardDetector:
       k_col = (0, 255, 120) if p.get('kill_locked', False) else (0, 220, 255)
       cv2.putText(preview, f"{p['kills']}", (k_x, k_y),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.44, k_col, 1, cv2.LINE_AA)
+
+      if res.get('spectatedRow') == idx_p:
+        cv2.rectangle(preview, (s1[0], s1[1] + y0), (s2[2], s1[1] + y1), (0, 215, 255), 2)
+        cv2.putText(preview, "EYE", (s2[2] + 6, y_abs + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 215, 255), 1, cv2.LINE_AA)
 
     hud_end_x = max(200, s1[0] - 15) if s1[0] > 200 else w
     cv2.rectangle(preview, (0, 0), (hud_end_x, 36), (15, 10, 25), -1)
@@ -1666,7 +2109,6 @@ class ThreadedScoreboardDetector:
       cv2.putText(preview, row_str, (38, y_pos),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.40, txt_col, 1, cv2.LINE_AA)
 
-    hp_res = res.get('hp_result')
     if hp_res and self.hp_pipeline is not None:
       preview = self.hp_pipeline.draw_debug_overlay(preview, hp_res, show_canvas_preview=True)
 
@@ -1711,15 +2153,26 @@ def run_live_scoreboard(
   sync_gap: float = 1.2,
   display: bool = True,
   calibrate: bool = False,
+  calibrate_hp: bool = False,
+  calibrate_names: bool = False,
   stream_id: str = "default",
   max_teams: int = 12,
   write_local_json: bool = True,
   calibration_file: Optional[str] = None,
+  hp_config_file: Optional[str] = None,
   sync_peers: int = 1,
-  barrier_timeout: float = 15.0
+  barrier_timeout: float = 15.0,
+  role: str = "scoreboard",
+  enable_hp: bool = True,
+  team_names_file: Optional[str] = None,
+  setup_teams: bool = False
 ):
+  if setup_teams:
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    prompt_lobby_team_names(team_names_file or default_team_names_path(root_dir), server_url=server_url)
+
   print("=" * 72, flush=True)
-  print(f" FREE FIRE LIVE SCOREBOARD VISION TRACKER [{stream_id}] (ASYNC 60 FPS ENGINE)", flush=True)
+  print(f" FREE FIRE LIVE SCOREBOARD VISION TRACKER [{stream_id} | {role}]", flush=True)
   print(f" Source: {source} | Max Teams: {max_teams} | Sync Cadence: {sync_gap}s | Backend: {server_url}", flush=True)
   print("=" * 72, flush=True)
 
@@ -1729,7 +2182,11 @@ def run_live_scoreboard(
     max_display_teams=max_teams,
     stream_id=stream_id,
     write_local_json=write_local_json,
-    calibration_file=calibration_file
+    calibration_file=calibration_file,
+    hp_config_file=hp_config_file,
+    role=role,
+    enable_hp=enable_hp,
+    team_names_file=team_names_file
   )
 
   is_image = False
@@ -1788,10 +2245,15 @@ def run_live_scoreboard(
     detector.running = False
     return
 
-  if calibrate:
+  if calibrate or calibrate_hp or calibrate_names:
     sample_f = frame_cache if is_image else cap.read()[1]
     if sample_f is not None:
-      detector.interactive_calibrate_slots(sample_f)
+      if calibrate:
+        detector.interactive_calibrate_slots(sample_f)
+      if calibrate_names:
+        detector.interactive_calibrate_name_slot(sample_f)
+      if calibrate_hp:
+        detector.interactive_calibrate_hp_border(sample_f)
 
   wait_for_stream_barrier(
     detector.server_url,
@@ -1802,16 +2264,18 @@ def run_live_scoreboard(
   )
 
   stream_tag = f" [{stream_id}]" if stream_id != "default" else ""
-  window_name = f"Free Fire Live Scoreboard Tracker{stream_tag} ['q' Quit | 's' Slots | 'l' Lock Roster | 'c' Clear]"
+  window_name = f"Free Fire Live Scoreboard Tracker{stream_tag} ['q' Quit | 's' Slots | 'n' Names | 'b'/'h' HP | 'l' Lock | 'c' Clear]"
   if display:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
     if stream_id == "stream_1":
-      cv2.moveWindow(window_name, 30, 30)
+      cv2.moveWindow(window_name, 20, 20)
     elif stream_id == "stream_2":
-      cv2.moveWindow(window_name, 160, 100)
+      cv2.moveWindow(window_name, 140, 80)
+    elif stream_id == "spectator":
+      cv2.moveWindow(window_name, 260, 140)
 
-  print("\n[Tracker Active] Controls: 'l' = Lock/Unlock Roster | 's' = Select Slots | 'c' = Clear Teams | 'q' = Quit\n")
+  print("\n[Tracker Active] Controls: 'l' = Lock Roster | 's' = Scoreboard Slots | 'n' = Player Names Slot | 'b'/'h' = HP Border | 'c' = Clear | 'q' = Quit\n")
 
   frame_interval = 1.0 / target_fps
   last_frame_time = time.time()
@@ -1852,6 +2316,10 @@ def run_live_scoreboard(
           break
         elif key == ord('s'):
           detector.interactive_calibrate_slots(frame)
+        elif key == ord('n'):
+          detector.interactive_calibrate_name_slot(frame)
+        elif key in (ord('b'), ord('h')):
+          detector.interactive_calibrate_hp_border(frame)
         elif key == ord('l'):
           detector.toggle_roster_lock()
         elif key == ord('c'):
@@ -1880,12 +2348,19 @@ if __name__ == '__main__':
   parser.add_argument("--display", action="store_true", default=True, help="Display OpenCV visual plotting window")
   parser.add_argument("--no-display", dest="display", action="store_false")
   parser.add_argument("--calibrate", action="store_true", help="Launch interactive 2-slot selector on startup")
+  parser.add_argument("--calibrate-hp", action="store_true", help="Launch interactive Spectator HP dark-mask border selector on startup")
+  parser.add_argument("--calibrate-names", action="store_true", help="Launch interactive Slot 3 spectator player-names selector on startup")
   parser.add_argument("--stream-id", type=str, default="default", help="Unique stream identifier (e.g. stream_1, stream_2)")
   parser.add_argument("--max-teams", type=int, default=12, help="Maximum persistent teams tracked by this stream (e.g. 6 for 6+6 split)")
   parser.add_argument("--no-local-json", dest="write_local_json", action="store_false", default=True, help="Disable direct live_state.json writes from Python (use in multi-stream)")
   parser.add_argument("--calibration", type=str, default=None, help="Optional per-stream slot calibration JSON path")
+  parser.add_argument("--hp-config", type=str, default=None, help="Optional per-stream HP dark-mask config JSON path")
   parser.add_argument("--sync-peers", type=int, default=1, help="Wait for N total streams at startup barrier before reading frames")
   parser.add_argument("--barrier-timeout", type=float, default=15.0, help="Max seconds to wait at startup barrier")
+  parser.add_argument("--role", type=str, default="scoreboard", choices=["scoreboard", "spectator"], help="Engine role: 'scoreboard' (6-team split) or 'spectator' (yellow eye + HP + squad stats)")
+  parser.add_argument("--no-hp", dest="enable_hp", action="store_false", default=True, help="Disable HP pipeline on scoreboard-only engines")
+  parser.add_argument("--team-names", type=str, default=None, help="Path to 12-team slot-color mapping JSON (default config/team_names.json)")
+  parser.add_argument("--setup-teams", action="store_true", help="Prompt to enter all 12 team names by slot color before starting")
 
   args = parser.parse_args()
   run_live_scoreboard(
@@ -1894,10 +2369,17 @@ if __name__ == '__main__':
     sync_gap=args.gap,
     display=args.display,
     calibrate=args.calibrate,
+    calibrate_hp=args.calibrate_hp,
+    calibrate_names=args.calibrate_names,
     stream_id=args.stream_id,
     max_teams=args.max_teams,
     write_local_json=args.write_local_json,
     calibration_file=args.calibration,
+    hp_config_file=args.hp_config,
     sync_peers=args.sync_peers,
-    barrier_timeout=args.barrier_timeout
+    barrier_timeout=args.barrier_timeout,
+    role=args.role,
+    enable_hp=args.enable_hp,
+    team_names_file=args.team_names,
+    setup_teams=args.setup_teams
   )

@@ -96,10 +96,12 @@ class BarAnalyzer:
         # 3. Yellow HP mask
         mask_yellow = cv2.inRange(hsv, self.hsv_ranges["yellow"][0], self.hsv_ranges["yellow"][1])
 
-        # 4. Red / Knocked HP mask
+        # 4. Red / Knocked HP mask (HSV + BGR red-channel dominance for compressed streams)
         mask_red1 = cv2.inRange(hsv, self.hsv_ranges["red1"][0], self.hsv_ranges["red1"][1])
         mask_red2 = cv2.inRange(hsv, self.hsv_ranges["red2"][0], self.hsv_ranges["red2"][1])
-        mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+        b_ch, g_ch, r_ch = cv2.split(core_bgr)
+        bgr_red = ((r_ch >= 115) & (r_ch.astype(np.int16) - np.maximum(g_ch, b_ch).astype(np.int16) >= 38)).astype(np.uint8) * 255
+        mask_red = cv2.bitwise_or(cv2.bitwise_or(mask_red1, mask_red2), bgr_red)
 
         # Combined multi-color active health mask
         active_mask = cv2.bitwise_or(mask_white, mask_green)
@@ -111,10 +113,10 @@ class BarAnalyzer:
         _, bright_mask = cv2.threshold(gray, self.brightness_threshold, 255, cv2.THRESH_BINARY)
         combined_mask = cv2.bitwise_or(active_mask, bright_mask)
 
-        # Check if red is dominant (indicative of low HP / knocked state)
+        # Check if red is dominant (player knocked down & bleeding in red)
         red_count = np.count_nonzero(mask_red)
         total_active = np.count_nonzero(combined_mask)
-        is_red_dominant = bool(total_active > 0 and (red_count / float(total_active)) >= 0.45)
+        is_red_dominant = bool(total_active > 0 and (red_count / float(total_active)) >= 0.35)
 
         return combined_mask, is_red_dominant
 
@@ -188,11 +190,11 @@ class BarAnalyzer:
         if w_bar - (last_filled_x + 1) <= 3 and raw_hp > 96.0:
             raw_hp = 100.0
 
-        # Tentative state classification
+        # Tentative state classification: any red HP bar above dead cutoff is KNOCKED & bleeding
         if raw_hp <= self.dead_hp_cutoff:
             tentative_state = "DEAD"
             raw_hp = 0.0
-        elif is_red and raw_hp <= 35.0:
+        elif is_red:
             tentative_state = "KNOCKED"
         else:
             tentative_state = "ALIVE"

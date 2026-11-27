@@ -29,7 +29,15 @@ const wsClients = new Set();
 const sseClients = new Set();
 const streamBarriers = new Map(); // barrierKey -> Map<streamId, timestampMs>
 
-function writeLiveStateFiles(state) {
+let pendingLiveState = null;
+let liveStateWriteTimer = null;
+let liveStateWriting = false;
+
+async function flushLiveStateFiles() {
+  if (liveStateWriting || !pendingLiveState) return;
+  liveStateWriting = true;
+  const state = pendingLiveState;
+  pendingLiveState = null;
   try {
     const stateJson = JSON.stringify(state, null, 2);
     const targets = [
@@ -37,11 +45,38 @@ function writeLiveStateFiles(state) {
       path.join(__dirname, '..', 'frontend', 'dist', 'live_state.json'),
       path.join(__dirname, 'live_state.json')
     ];
-    for (const t of targets) {
-      fs.mkdirSync(path.dirname(t), { recursive: true });
-      fs.writeFileSync(t, stateJson, 'utf8');
+    await Promise.all(
+      targets.map(async (t) => {
+        try {
+          await fs.promises.mkdir(path.dirname(t), { recursive: true });
+          await fs.promises.writeFile(t, stateJson, 'utf8');
+        } catch {}
+      })
+    );
+  } finally {
+    liveStateWriting = false;
+    if (pendingLiveState) {
+      setImmediate(flushLiveStateFiles);
     }
-  } catch {}
+  }
+}
+
+function writeLiveStateFiles(state, immediate = false) {
+  pendingLiveState = state;
+  if (immediate) {
+    if (liveStateWriteTimer) {
+      clearTimeout(liveStateWriteTimer);
+      liveStateWriteTimer = null;
+    }
+    setImmediate(flushLiveStateFiles);
+    return;
+  }
+  if (!liveStateWriteTimer) {
+    liveStateWriteTimer = setTimeout(() => {
+      liveStateWriteTimer = null;
+      flushLiveStateFiles();
+    }, 250);
+  }
 }
 
 function broadcastState(state) {
@@ -172,6 +207,7 @@ function handleWsUpgrade(req, socket, head) {
     ''
   ].join('\r\n');
 
+  socket.setNoDelay(true);
   socket.write(responseHeaders);
   wsClients.add(socket);
 
@@ -229,10 +265,17 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body);
         const newState = store.syncScoreboard(payload);
         broadcastState(newState);
-        writeLiveStateFiles(newState);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'SYNCED', teamsCount: newState.leaderboard.length }));
+        res.end(JSON.stringify({
+          status: 'SYNCED',
+          teamsCount: newState.leaderboard.length,
+          spectatedTeamName: newState.spectatorTeam?.name || null,
+          spectatedColor: newState.spectatorTeam?.colorName || null
+        }));
+
+        // Async debounced fallback write AFTER WebSocket broadcast & HTTP reply
+        writeLiveStateFiles(newState, false);
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
@@ -275,6 +318,30 @@ const server = http.createServer((req, res) => {
           arrived: entry.size,
           expected
         }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // API: Lobby 12-team slot-color mapping
+  if (url.pathname === '/api/roster/colors' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ teamNames: store.teamNameMap }));
+  }
+
+  if (url.pathname === '/api/roster/colors' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const payload = body ? JSON.parse(body) : {};
+        const newState = store.setTeamNameMap(payload.teamNames || payload);
+        broadcastState(newState);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'SAVED', count: Object.keys(store.teamNameMap).length }));
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));

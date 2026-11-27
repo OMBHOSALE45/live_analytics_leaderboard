@@ -7,10 +7,10 @@ const DEFAULT_SQUAD = {
   flagColors: ['#FF9933', '#138808'],
   chakra: true,
   players: [
-    { seat: 1, name: 'TAG.SAHIL7', kills: 1, weapon: 'fist', status: 'none', alive: true, hp: 100 },
-    { seat: 2, name: 'TAG.KDGOD', kills: 1, weapon: 'sniper', status: 'none', alive: true, hp: 100 },
-    { seat: 3, name: 'TAG.SHOT017', kills: 0, weapon: 'ar', status: 'parachute', alive: true, hp: 100 },
-    { seat: 4, name: 'TAG.LOUIS', kills: 1, weapon: 'ar', status: 'car', alive: true, hp: 100 },
+    { seat: 1, name: 'TAG.SAHIL7', kills: 1, weapon: 'fist', status: 'none', alive: true, hp: 100, hpState: 'ALIVE' },
+    { seat: 2, name: 'TAG.KDGOD', kills: 1, weapon: 'sniper', status: 'none', alive: true, hp: 100, hpState: 'ALIVE' },
+    { seat: 3, name: 'TAG.SHOT017', kills: 0, weapon: 'ar', status: 'parachute', alive: true, hp: 100, hpState: 'ALIVE' },
+    { seat: 4, name: 'TAG.LOUIS', kills: 1, weapon: 'ar', status: 'car', alive: true, hp: 100, hpState: 'ALIVE' },
   ],
 };
 
@@ -65,19 +65,49 @@ function StatusBadge({ status }) {
   return null;
 }
 
-function mapLiveTeamToSquad(team) {
-  const players = (team.players || []).slice(0, 4).map((p, idx) => ({
-    seat: p.slot || idx + 1,
-    name: p.name || `Player_${idx + 1}`,
-    kills: p.kills || 0,
-    weapon: idx === 0 ? 'fist' : idx === 1 ? 'sniper' : 'ar',
-    status: 'none',
-    alive: p.alive !== false,
-    hp: typeof p.hp === 'number' ? p.hp : (p.alive !== false ? 100 : 0),
-  }));
+function buildSquadState(team, spectatorHp) {
+  const hpPlayers = Array.isArray(spectatorHp?.players) ? spectatorHp.players : [];
+  const hpBySlot = new Map(hpPlayers.map((p) => [Number(p.slot), p]));
+  const basePlayers = Array.isArray(team?.players) && team.players.length > 0
+    ? team.players.slice(0, 4)
+    : DEFAULT_SQUAD.players;
+
+  const players = [0, 1, 2, 3].map((idx) => {
+    const slotNum = idx + 1;
+    const tp = basePlayers[idx];
+    const hpEntry = hpBySlot.get(slotNum);
+    const rawHp = typeof hpEntry?.hp === 'number'
+      ? hpEntry.hp
+      : (typeof tp?.hp === 'number' ? tp.hp : (tp?.alive === false ? 0 : 100));
+    const hpState = hpEntry?.state
+      || tp?.hpState
+      || tp?.hp_state
+      || (rawHp <= 0 || tp?.alive === false ? 'DEAD' : 'ALIVE');
+    const isAlive = hpState !== 'DEAD' && rawHp > 0;
+    const isRed = Boolean(hpEntry?.isRed) || hpState === 'KNOCKED';
+
+    return {
+      seat: tp?.slot || tp?.seat || slotNum,
+      name: tp?.name || `Player_${slotNum}`,
+      kills: tp?.kills ?? 0,
+      weapon: tp?.weapon || (idx === 0 ? 'fist' : idx === 1 ? 'sniper' : 'ar'),
+      status: tp?.status || 'none',
+      alive: isAlive,
+      isRed,
+      hp: Math.max(0, Math.min(100, rawHp)),
+      hpState: isRed && isAlive ? 'KNOCKED' : hpState,
+    };
+  });
+
+  if (!team) {
+    return {
+      ...DEFAULT_SQUAD,
+      players,
+    };
+  }
 
   const rawName = (team.name || 'TEAM').trim();
-  const tag = rawName.split(/\s+/)[0].slice(0, 5).toUpperCase();
+  const tag = (team.clanTag || rawName.replace(/^TEAM\s+/i, '').split(/\s+/)[0].slice(0, 6)).toUpperCase() || 'TEAM';
 
   return {
     clanTag: tag,
@@ -89,60 +119,116 @@ function mapLiveTeamToSquad(team) {
   };
 }
 
+function getHpBarClass(hp, hpState) {
+  if (hpState === 'DEAD' || hp <= 0) {
+    return 'bg-transparent';
+  }
+  if (hpState === 'KNOCKED') {
+    return 'knocked-bleed-bar bg-gradient-to-r from-red-700/80 via-red-500/65 to-rose-500/35 border-r-2 border-red-400 shadow-[inset_0_0_18px_rgba(239,68,68,0.5)]';
+  }
+  if (hp <= 25) {
+    return 'bg-gradient-to-r from-red-600/65 via-rose-500/35 to-red-400/15 border-r-2 border-red-400/90';
+  }
+  if (hp <= 50) {
+    return 'bg-gradient-to-r from-amber-500/45 via-amber-400/25 to-amber-300/10 border-r-2 border-amber-300/85';
+  }
+  return 'bg-gradient-to-r from-emerald-500/45 via-emerald-500/25 to-teal-400/10 border-r-2 border-emerald-400/80';
+}
+
 export default function App() {
-  const [squad, setSquad] = useState(DEFAULT_SQUAD);
+  const [liveData, setLiveData] = useState(null);
+  const [hpLive, setHpLive] = useState(false);
 
   useEffect(() => {
     let ws;
+    let sse;
+    let reconnectTimer;
     let cancelled = false;
 
     const applyPayload = (data) => {
-      if (cancelled || !data || !Array.isArray(data.leaderboard) || data.leaderboard.length === 0) {
-        return;
-      }
-      const target = data.leaderboard.find((t) => t.isSpectated) || data.leaderboard[0];
-      if (target) {
-        setSquad(mapLiveTeamToSquad(target));
+      if (cancelled || !data) return;
+      const specHp = data.spectatorHp || data.match?.spectatorHp || null;
+      const specTeam = data.spectatorTeam || data.match?.spectatorTeam || null;
+      const hasTeams = Array.isArray(data.leaderboard) && data.leaderboard.length > 0;
+      if (hasTeams || specTeam || (specHp && Array.isArray(specHp.players) && specHp.players.length > 0)) {
+        setLiveData(data);
+        setHpLive(Boolean(specHp && Array.isArray(specHp.players) && specHp.players.length > 0));
       }
     };
 
     const pollMatch = async () => {
-      try {
-        const host = window.location.hostname || 'localhost';
-        const res = await fetch(`http://${host}:3001/api/match`);
-        if (res.ok) {
-          applyPayload(await res.json());
+      const host = window.location.hostname || 'localhost';
+      for (const url of ['/api/match', `http://${host}:3001/api/match`, `/live_state.json?t=${Date.now()}`]) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            const json = await res.json();
+            if (json && (json.leaderboard || json.match || json.spectatorHp)) {
+              applyPayload(json);
+              return;
+            }
+          }
+        } catch {
+          // Try next tier
         }
-      } catch {
-        // Keep default Stitch squad when backend is offline
       }
     };
 
     pollMatch();
+    const pollInterval = setInterval(pollMatch, 500);
 
-    try {
-      const host = window.location.hostname || 'localhost';
-      ws = new WebSocket(`ws://${host}:3001`);
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'init' || msg.type === 'leaderboard:update') {
-            applyPayload(msg.data);
+    const connectWebSocket = () => {
+      try {
+        const host = window.location.hostname || 'localhost';
+        ws = new WebSocket(`ws://${host}:3001`);
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'init' || msg.type === 'leaderboard:update') {
+              applyPayload(msg.data);
+            }
+          } catch {
+            // Ignore malformed frames
           }
-        } catch {
-          // Ignore malformed frames
-        }
-      };
-    } catch {
-      // Ignore WebSocket errors when offline
-    }
+        };
+        ws.onclose = () => {
+          if (!cancelled) reconnectTimer = setTimeout(connectWebSocket, 2500);
+        };
+        ws.onerror = () => ws.close();
+      } catch {
+        try {
+          sse = new EventSource('/api/stream');
+          sse.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === 'init' || msg.type === 'leaderboard:update') {
+                applyPayload(msg.data);
+              }
+            } catch {}
+          };
+        } catch {}
+      }
+    };
+
+    connectWebSocket();
 
     return () => {
       cancelled = true;
+      clearInterval(pollInterval);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
+      if (sse) sse.close();
     };
   }, []);
 
+  const spectatorHp = liveData?.spectatorHp || liveData?.match?.spectatorHp || null;
+  const spectatorTeam = liveData?.spectatorTeam || liveData?.match?.spectatorTeam || null;
+  const activeTeam = spectatorTeam || (
+    Array.isArray(liveData?.leaderboard) && liveData.leaderboard.length > 0
+      ? (liveData.leaderboard.find((t) => t.isSpectated) || liveData.leaderboard[0])
+      : null
+  );
+  const squad = buildSquadState(activeTeam, spectatorHp);
   const totalElims = squad.players.reduce((sum, p) => sum + (p.kills || 0), 0);
 
   return (
@@ -193,9 +279,16 @@ export default function App() {
                 </div>
 
                 <div className="pl-2">
-                  <h2 className="font-chakra font-black text-2xl tracking-wider text-white uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
-                    {squad.clanTag}
-                  </h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-chakra font-black text-2xl tracking-wider text-white uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+                      {squad.clanTag}
+                    </h2>
+                    {hpLive && (
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-[9px] font-chakra font-bold text-emerald-300 tracking-wider uppercase">
+                        HP SYNC
+                      </span>
+                    )}
+                  </div>
                   <p className="font-chakra text-[10px] text-purple-300 font-semibold tracking-widest -mt-1 uppercase">
                     {squad.fullName}
                   </p>
@@ -216,30 +309,53 @@ export default function App() {
             <div className="flex flex-col divide-y divide-purple-900/60 font-hud">
               {squad.players.map((player, idx) => {
                 const isAlt = idx % 2 === 1;
-                const isKnocked = !player.alive || player.hp <= 0;
+                const isDead = player.hpState === 'DEAD' || player.hp <= 0;
+                const isKnocked = player.hpState === 'KNOCKED';
                 const hpPct = Math.max(0, Math.min(100, player.hp ?? 100));
 
                 return (
                   <div
                     key={player.seat}
-                    className={`${isAlt ? 'ffws-player-row-alt' : 'ffws-player-row'} ${isKnocked ? 'knocked-active border-l-4 border-red-500 opacity-75' : ''
-                      } flex items-center justify-between px-3 py-2 transition-all duration-300 hover:bg-purple-900/40 relative`}
+                    className={`${isAlt ? 'ffws-player-row-alt' : 'ffws-player-row'} ${
+                      isKnocked ? 'knocked-active border-l-4 border-red-500' : ''
+                    } ${isDead ? 'opacity-50 grayscale' : ''} flex items-center justify-between px-3 py-2 transition-colors duration-150 hover:bg-purple-900/40 relative overflow-hidden`}
                   >
+                    {/* Full-row HP background bleed: delayed damage-drain trail + live HP fill */}
                     <div
-                      className="absolute bottom-0 left-0 h-[2px] bg-gradient-to-r from-emerald-400 via-emerald-500 to-transparent transition-all duration-300"
+                      className={`absolute inset-y-0 left-0 ${isKnocked ? 'bg-red-500/35' : 'bg-white/20'} transition-[width] duration-500 ease-out pointer-events-none z-0`}
+                      style={{ width: `${hpPct}%` }}
+                    />
+                    <div
+                      className={`absolute inset-y-0 left-0 ${getHpBarClass(hpPct, player.hpState)} transition-[width] duration-75 ease-linear pointer-events-none z-0`}
                       style={{ width: `${hpPct}%` }}
                     />
 
-                    <div className="flex items-center space-x-3">
-                      <div className="w-6 h-6 rounded bg-[#0d071e] border border-purple-700/50 flex items-center justify-center text-white font-chakra font-bold text-sm shadow-inner">
+                    <div className="relative z-10 flex items-center space-x-3 min-w-0">
+                      <div className={`w-6 h-6 rounded border flex items-center justify-center font-chakra font-bold text-sm shadow-inner flex-shrink-0 ${
+                        isKnocked
+                          ? 'bg-red-950/90 border-red-500/80 text-red-200'
+                          : 'bg-[#0d071e] border-purple-700/50 text-white'
+                      }`}>
                         {player.seat}
                       </div>
-                      <span className="font-chakra font-bold text-sm text-white tracking-wide uppercase drop-shadow">
+                      <span className={`font-chakra font-bold text-sm tracking-wide uppercase drop-shadow truncate ${
+                        isKnocked ? 'text-red-100' : 'text-white'
+                      }`}>
                         {player.name}
                       </span>
+                      {isKnocked && (
+                        <span className="px-1.5 py-0.5 rounded bg-red-600/90 border border-red-300/40 text-[9px] font-chakra font-bold text-white tracking-wider uppercase animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]">
+                          KNOCKED
+                        </span>
+                      )}
+                      {isDead && (
+                        <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-600 text-[9px] font-chakra font-bold text-gray-300 tracking-wider uppercase">
+                          DEAD
+                        </span>
+                      )}
                     </div>
 
-                    <div className="flex items-center space-x-3">
+                    <div className="relative z-10 flex items-center space-x-3 flex-shrink-0">
                       <WeaponIcon weapon={player.weapon} />
                       <span className="font-tall-num text-2xl font-bold text-white tracking-normal min-w-[16px] text-right">
                         {player.kills}

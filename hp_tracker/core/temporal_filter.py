@@ -15,11 +15,11 @@ class SlotFilter:
 
     def __init__(
         self,
-        median_window: int = 5,
-        hysteresis_pct: float = 1.2,
-        dead_frames_required: int = 4,
-        knocked_frames_required: int = 3,
-        alive_frames_required: int = 2
+        median_window: int = 2,
+        hysteresis_pct: float = 0.5,
+        dead_frames_required: int = 2,
+        knocked_frames_required: int = 1,
+        alive_frames_required: int = 1
     ):
         self.median_window = median_window
         self.hysteresis_pct = hysteresis_pct
@@ -84,8 +84,6 @@ class SlotFilter:
         if self.current_state == "DEAD":
             smoothed_hp = 0.0
             self.current_smoothed_hp = 0.0
-        elif self.current_state == "KNOCKED":
-            smoothed_hp = min(35.0, self.current_smoothed_hp)
         else:
             smoothed_hp = self.current_smoothed_hp
 
@@ -106,11 +104,11 @@ class TemporalFilter:
 
     def __init__(self, config_or_path: Optional[Any] = None, num_slots: int = 4):
         self.num_slots = num_slots
-        self.median_window = 5
-        self.hysteresis_pct = 1.2
-        self.dead_frames_required = 4
-        self.knocked_frames_required = 3
-        self.alive_frames_required = 2
+        self.median_window = 2
+        self.hysteresis_pct = 0.5
+        self.dead_frames_required = 2
+        self.knocked_frames_required = 1
+        self.alive_frames_required = 1
 
         self.last_team_id: Optional[Any] = None
 

@@ -1,10 +1,35 @@
 {
-  "canvas_roi": [0.035, 0.080, 0.360, 0.560],
+  "canvas_roi": [
+    0.0148,
+    0.6458,
+    0.2414,
+    0.9705
+  ],
   "bars_roi": [
-    [0.0811, 0.1680, 0.3418, 0.1830],
-    [0.0811, 0.2810, 0.3418, 0.2970],
-    [0.0811, 0.3890, 0.3418, 0.4050],
-    [0.0801, 0.5150, 0.3408, 0.5310]
+    [
+      0.0539,
+      0.7118,
+      0.225,
+      0.724
+    ],
+    [
+      0.0539,
+      0.7847,
+      0.225,
+      0.7969
+    ],
+    [
+      0.0539,
+      0.8559,
+      0.225,
+      0.8681
+    ],
+    [
+      0.0539,
+      0.9288,
+      0.225,
+      0.941
+    ]
   ],
   "core_height_fraction": 0.5,
   "contiguous_gap_threshold": 5,
@@ -12,34 +37,75 @@
   "brightness_threshold": 130,
   "hsv_thresholds": {
     "white_hp": {
-      "lower": [0, 0, 160],
-      "upper": [180, 60, 255]
+      "lower": [
+        0,
+        0,
+        160
+      ],
+      "upper": [
+        180,
+        60,
+        255
+      ]
     },
     "green_hp": {
-      "lower": [35, 60, 70],
-      "upper": [85, 255, 255]
+      "lower": [
+        35,
+        60,
+        70
+      ],
+      "upper": [
+        85,
+        255,
+        255
+      ]
     },
     "yellow_hp": {
-      "lower": [18, 80, 80],
-      "upper": [35, 255, 255]
+      "lower": [
+        18,
+        80,
+        80
+      ],
+      "upper": [
+        35,
+        255,
+        255
+      ]
     },
     "red_hp_1": {
-      "lower": [0, 90, 80],
-      "upper": [12, 255, 255]
+      "lower": [
+        0,
+        90,
+        80
+      ],
+      "upper": [
+        12,
+        255,
+        255
+      ]
     },
     "red_hp_2": {
-      "lower": [168, 90, 80],
-      "upper": [180, 255, 255]
+      "lower": [
+        168,
+        90,
+        80
+      ],
+      "upper": [
+        180,
+        255,
+        255
+      ]
     }
   },
   "smoothing": {
-    "median_window": 5,
-    "hysteresis_pct": 1.2
+    "median_window": 2,
+    "hysteresis_pct": 0.5
   },
   "debounce": {
-    "dead_frames_required": 4,
-    "knocked_frames_required": 3,
-    "alive_frames_required": 2
+    "dead_frames_required": 2,
+    "knocked_frames_required": 1,
+    "alive_frames_required": 1
   },
-  "dead_hp_cutoff": 1.5
+  "dead_hp_cutoff": 1.5,
+  "locked": true
 }

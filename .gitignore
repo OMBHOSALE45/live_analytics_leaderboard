@@ -91,3 +91,13 @@ desktop.ini
 *.sw?
 .agent/
 
+# Graphify local caches, internal state & dated backups
+graphify-out/cache/
+graphify-out/20*/
+graphify-out/.graphify_*
+
+# Per-stream runtime calibration overrides
+slot_calibration_*.json
+hp_tracker/config/hp_config_*.json
+
+
